@@ -569,6 +569,11 @@
             color: #005700;
         }
 
+        .badge-digital {
+            background: #f0e9ff;
+            color: #4b2b8a;
+        }
+
         .json-output {
             background: #1e1e1e;
             color: #d4d4d4;
@@ -720,6 +725,10 @@
                     <div class="stat-label">OneMap</div>
                 </div>
                 <div class="stat-item">
+                    <span id="progress-digital" class="stat-number">0</span>
+                    <div class="stat-label">Digital Sources</div>
+                </div>
+                <div class="stat-item">
                     <span id="progress-total" class="stat-number">0</span>
                     <div class="stat-label">Total</div>
                 </div>
@@ -741,11 +750,15 @@
                             <th>Closed</th>
                             <th>Closed (Low)</th>
                             <th>Closed (Missing)</th>
+                            <th>OSM</th>
+                            <th>DataGov</th>
+                            <th>OneMap</th>
+                            <th>Digital</th>
                             <th>Total Source Records</th>
                         </tr>
                     </thead>
                     <tbody id="sync-history-body">
-                        <tr><td colspan="10">No sync history yet.</td></tr>
+                        <tr><td colspan="14">No sync history yet.</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -841,6 +854,10 @@
                     <div class="data-stat-box">
                         <div class="number" id="onemap-count">--</div>
                         <div class="label">OneMap</div>
+                    </div>
+                    <div class="data-stat-box">
+                        <div class="number" id="digital-count">--</div>
+                        <div class="label">Digital Sources</div>
                     </div>
                     <div class="data-stat-box">
                         <div class="number" id="raw-total">--</div>
@@ -942,6 +959,7 @@
         const progressOsm = document.getElementById('progress-osm');
         const progressDatagov = document.getElementById('progress-datagov');
         const progressOnemap = document.getElementById('progress-onemap');
+        const progressDigital = document.getElementById('progress-digital');
         const progressTotal = document.getElementById('progress-total');
         const syncProgressFill = document.getElementById('sync-progress-fill');
         const syncProgressLabel = document.getElementById('sync-progress-label');
@@ -1052,6 +1070,7 @@
                 progressOsm.textContent = counts.osm || 0;
                 progressDatagov.textContent = counts.datagov || 0;
                 progressOnemap.textContent = counts.onemap || 0;
+                progressDigital.textContent = counts.digital || 0;
                 progressTotal.textContent = counts.total || 0;
 
                 const status = progress.status || 'idle';
@@ -1061,6 +1080,20 @@
                 const pct = Math.max(0, Math.min(100, Number(progress.progress_percent || 0)));
                 syncProgressFill.style.width = `${pct}%`;
                 syncProgressLabel.textContent = `${pct.toFixed(0)}%`;
+
+                const liveSummary = progress.live_change_summary || {};
+                if (status === 'running') {
+                    const liveNew = Number(liveSummary.new_count || 0);
+                    const liveUpdated = Number(liveSummary.updated_count || 0);
+                    const liveClosed = Number(liveSummary.closed_count || 0);
+                    changeNewCount.textContent = liveNew;
+                    changeUpdatedCount.textContent = liveUpdated;
+                    changeClosedCount.textContent = liveClosed;
+                    changeClosedLowConfCount.textContent = '0';
+                    changeClosedMissingCount.textContent = '0';
+                    changeTotalCount.textContent = liveNew + liveUpdated + liveClosed;
+                    changesSummary.textContent = `Live sync changes: ${liveNew} new, ${liveUpdated} updated, ${liveClosed} closed (in progress).`;
+                }
 
                 if ((status === 'success' || status === 'failed') && latestProgressRunId && latestProgressRunId !== lastRenderedChangesRunId) {
                     showChanges(latestProgressRunId);
@@ -1078,11 +1111,12 @@
                 const history = payload.history || [];
 
                 if (!history.length) {
-                    syncHistoryBody.innerHTML = '<tr><td colspan="10">No sync history yet.</td></tr>';
+                    syncHistoryBody.innerHTML = '<tr><td colspan="14">No sync history yet.</td></tr>';
                     return;
                 }
 
                 syncHistoryBody.innerHTML = history.map(item => {
+                    const sourceCounts = item.source_counts || {};
                     const total = item.source_counts?.total || 0;
                     return `
                         <tr>
@@ -1095,6 +1129,10 @@
                             <td>${item.closed_count || 0}</td>
                             <td>${item.closed_low_conf_count || 0}</td>
                             <td>${item.closed_missing_count || 0}</td>
+                            <td>${sourceCounts.osm || 0}</td>
+                            <td>${sourceCounts.datagov || 0}</td>
+                            <td>${sourceCounts.onemap || 0}</td>
+                            <td>${sourceCounts.digital || 0}</td>
                             <td>${total}</td>
                         </tr>
                     `;
@@ -1205,6 +1243,8 @@
             const lat = coords.lat !== undefined && coords.lat !== null ? Number(coords.lat).toFixed(6) : 'N/A';
             const lng = coords.lng !== undefined && coords.lng !== null ? Number(coords.lng).toFixed(6) : 'N/A';
             const confidence = item.confidence !== undefined ? item.confidence : ((item.confidence_score || 0) / 100.0);
+            const decisionScore = item.decision_score !== undefined ? item.decision_score : confidence;
+            const digitalScore = item.digital_footprint_score !== undefined ? item.digital_footprint_score : 0;
             const status = item.predicted_status || 'Detected Change';
             const statusClass = status === 'Closed Place' ? 'status-closed' : (status === 'Existing Place' ? 'status-existing' : 'status-new');
             const confClass = confidence >= 0.8 ? 'conf-high' : (confidence >= 0.6 ? 'conf-med' : 'conf-low');
@@ -1224,9 +1264,13 @@
                     <div><b>Coordinates:</b> ${lat}, ${lng}</div>
                     <div><b>Match in Database:</b> ${item.match_in_database || 'Found'}</div>
                     <div><b>Confidence:</b> ${confidence}</div>
+                    <div><b>Decision Score:</b> ${decisionScore}</div>
+                    <div><b>Digital Footprint Score:</b> ${digitalScore}</div>
+                    ${item.decision_status ? `<div><b>Decision Status:</b> ${item.decision_status}</div>` : ''}
                     <div><b>Confirmed From:</b> ${item.confirmed_from || 'Unknown'}</div>
                     <div><b>Reason:</b> ${item.reason || 'No explicit reason provided'}</div>
                     ${item.closure_type ? `<div><b>Closure Type:</b> ${item.closure_type}</div>` : ''}
+                    ${Array.isArray(item.signal_breakdown) && item.signal_breakdown.length ? `<div><b>Signal Breakdown:</b> ${item.signal_breakdown.map(s => `${s.name}:${s.score}`).join(' | ')}</div>` : ''}
                     <div><b>Recommendation:</b> ${item.recommendation || 'Review'} (Review / Reject / Accept)</div>
                     <div><b>Sources:</b> ${(item.sources || []).join(', ') || 'Unknown'}</div>
                     ${item.phone ? `<div><b>Phone:</b> ${item.phone}</div>` : ''}
@@ -1342,11 +1386,13 @@
             const osmCount = stage1.osm?.count ?? stage1.osm ?? 0;
             const datagovCount = stage1.datagov?.count ?? stage1.data_gov?.count ?? stage1.datagov ?? 0;
             const onemapCount = stage1.onemap?.count ?? stage1.onemap ?? 0;
-            const rawTotal = stage1.total ?? data.statistics?.raw_total_records ?? (osmCount + datagovCount + onemapCount);
+            const digitalCount = stage1.digital?.count ?? stage1.digital ?? 0;
+            const rawTotal = stage1.total ?? data.statistics?.raw_total_records ?? (osmCount + datagovCount + onemapCount + digitalCount);
 
             document.getElementById('osm-count').textContent = osmCount;
             document.getElementById('datagov-count').textContent = datagovCount;
             document.getElementById('onemap-count').textContent = onemapCount;
+            document.getElementById('digital-count').textContent = digitalCount;
             document.getElementById('raw-total').textContent = rawTotal;
 
             document.getElementById('raw-data-table').innerHTML = `
@@ -1356,6 +1402,7 @@
                         <tr><td><span class="source-badge badge-osm">OSM</span></td><td>${osmCount}</td></tr>
                         <tr><td><span class="source-badge badge-datagov">DATAGOV</span></td><td>${datagovCount}</td></tr>
                         <tr><td><span class="source-badge badge-onemap">ONEMAP</span></td><td>${onemapCount}</td></tr>
+                        <tr><td><span class="source-badge badge-digital">DIGITAL</span></td><td>${digitalCount}</td></tr>
                     </tbody>
                 </table>
             `;

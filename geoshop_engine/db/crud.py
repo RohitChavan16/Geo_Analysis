@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import List, Optional, Dict, Any
+import re
 from db.database import get_database
 from db.models import ShopDocument, SyncLogDocument, ShopResponse
 from pymongo.collection import Collection
@@ -176,8 +177,12 @@ def find_similar_shops(name: str, lat: float, lng: float, threshold: float = 0.1
     delta = threshold / 111.0  # Convert km to degrees
 
     try:
+        first_token = str(name or "").strip().split()[0] if str(name or "").strip() else ""
+        if not first_token:
+            return []
         shops = list(shops_collection.find({
-            "name": {"$regex": name.split()[0], "$options": "i"},  # Match first word
+            # Escape user/data token so special regex chars like "(" don't break Mongo regex.
+            "name": {"$regex": re.escape(first_token), "$options": "i"},  # Match first word safely
             "lat": {"$gte": lat - delta, "$lte": lat + delta},
             "lng": {"$gte": lng - delta, "$lte": lng + delta},
             "is_active": True

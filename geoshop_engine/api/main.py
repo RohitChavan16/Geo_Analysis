@@ -1,7 +1,8 @@
-﻿from datetime import datetime, timedelta
+from datetime import datetime, timedelta
 from typing import List, Optional
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,6 +34,7 @@ from signal_engine.signal_calculator import calculate_confidence
 from data_fetchers.datagov_fetcher import fetch_datagov_data
 from data_fetchers.osm_fetcher import fetch_osm_shops
 from data_fetchers.onemap_fetcher import fetch_onemap_shops
+from data_fetchers.digital_sources_fetcher import fetch_digital_sources
 
 
 app = FastAPI(
@@ -56,10 +58,11 @@ SYNC_PROGRESS = {
     "status": "idle",
     "stage": "idle",
     "message": "No sync running",
-    "source_counts": {"osm": 0, "datagov": 0, "onemap": 0, "total": 0},
+    "source_counts": {"osm": 0, "datagov": 0, "onemap": 0, "digital": 0, "total": 0},
     "matched_groups": 0,
     "scored_records": 0,
     "updated_records": 0,
+    "live_change_summary": {"new_count": 0, "updated_count": 0, "closed_count": 0},
     "progress_percent": 0,
     "last_updated": None,
 }
@@ -93,6 +96,62 @@ async def startup_event():
 def update_sync_progress(**kwargs):
     SYNC_PROGRESS.update(kwargs)
     SYNC_PROGRESS["last_updated"] = datetime.utcnow().isoformat()
+
+
+def _build_inferred_digital_records(*source_lists, limit: int = 1200) -> list:
+    """
+    Fallback digital-source builder.
+    Derives digital-footprint records from primary sources when external
+    digital scraping returns empty, so digital signals still flow.
+    """
+    inferred = []
+    seen = set()
+    for source_list in source_lists:
+        for rec in source_list or []:
+            try:
+                name = str(rec.get("name") or "").strip()
+                if not name:
+                    continue
+                lat = float(rec.get("lat"))
+                lng = float(rec.get("lng"))
+            except Exception:
+                continue
+
+            # Keep only records with digital-like evidence.
+            has_digital_evidence = any(
+                [
+                    rec.get("website"),
+                    rec.get("phone"),
+                    rec.get("opening_hours"),
+                ]
+            )
+            if not has_digital_evidence:
+                continue
+
+            key = f"{name.lower()}|{round(lat, 5)}|{round(lng, 5)}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            inferred.append(
+                {
+                    "name": rec.get("name"),
+                    "address": rec.get("address"),
+                    "lat": lat,
+                    "lng": lng,
+                    "source": "digital_inferred",
+                    "shop_type": rec.get("shop_type"),
+                    "phone": rec.get("phone"),
+                    "website": rec.get("website"),
+                    "opening_hours": rec.get("opening_hours"),
+                    "postal_code": rec.get("postal_code"),
+                    "digital_origin": rec.get("source"),
+                }
+            )
+
+            if len(inferred) >= limit:
+                return inferred
+    return inferred
 
 
 @app.get("/api/shops", response_model=List[ShopResponse])
@@ -174,7 +233,7 @@ async def get_sync_history(limit: int = Query(20, ge=1, le=100)):
                 "closed_count": summary.get("closed_count", 0),
                 "closed_low_conf_count": summary.get("closed_low_conf_count", 0),
                 "closed_missing_count": summary.get("closed_missing_count", 0),
-                "source_counts": log.get("source_counts", {"osm": 0, "datagov": 0, "onemap": 0, "total": 0}),
+                "source_counts": log.get("source_counts", {"osm": 0, "datagov": 0, "onemap": 0, "digital": 0, "total": 0}),
                 "error_message": log.get("error_message"),
             })
         return {"history": history}
@@ -197,11 +256,11 @@ async def get_sync_changes(run_id: Optional[str] = Query(None, description="Spec
                 "new_shops": [],
                 "closed_shops": [],
                 "updated_shops": [],
-                "source_counts": {"osm": 0, "datagov": 0, "onemap": 0, "total": 0},
+                "source_counts": {"osm": 0, "datagov": 0, "onemap": 0, "digital": 0, "total": 0},
             }
 
         change_summary = sync_log.get("change_summary", {})
-        source_counts = sync_log.get("source_counts", {"osm": 0, "datagov": 0, "onemap": 0, "total": 0})
+        source_counts = sync_log.get("source_counts", {"osm": 0, "datagov": 0, "onemap": 0, "digital": 0, "total": 0})
 
         return {
             "run_id": sync_log.get("run_id"),
@@ -235,10 +294,11 @@ async def trigger_sync(background_tasks: BackgroundTasks):
             status="running",
             stage="queued",
             message="Sync queued",
-            source_counts={"osm": 0, "datagov": 0, "onemap": 0, "total": 0},
+            source_counts={"osm": 0, "datagov": 0, "onemap": 0, "digital": 0, "total": 0},
             matched_groups=0,
             scored_records=0,
             updated_records=0,
+            live_change_summary={"new_count": 0, "updated_count": 0, "closed_count": 0},
             progress_percent=0,
         )
 
@@ -260,6 +320,7 @@ def run_sync_pipeline(run_id: str):
             status="failed",
             stage="failed",
             message=error_msg,
+            live_change_summary={"new_count": 0, "updated_count": 0, "closed_count": 0},
         )
         print(f"Sync failed: {error_msg}")
 
@@ -280,10 +341,11 @@ async def trigger_realtime_update(
             status="running",
             stage="queued",
             message="Realtime update queued",
-            source_counts={"osm": 0, "datagov": 0, "onemap": 0, "total": 0},
+            source_counts={"osm": 0, "datagov": 0, "onemap": 0, "digital": 0, "total": 0},
             matched_groups=0,
             scored_records=0,
             updated_records=0,
+            live_change_summary={"new_count": 0, "updated_count": 0, "closed_count": 0},
             progress_percent=0,
         )
 
@@ -313,9 +375,12 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
     def _format_change(shop: dict, status: str, recommendation: str, source_counts: dict, reason: str, closure_type: Optional[str] = None) -> dict:
         sources = shop.get("sources", [])
         weighted_confidence = float(shop.get("confidence_score", 0)) / 100.0
+        decision_score = float(shop.get("decision_score", shop.get("confidence_score", 0))) / 100.0
+        digital_footprint = float(shop.get("digital_footprint_score", 0)) / 100.0
         if sources:
             factors = [_source_weight_factor(s, source_counts) for s in sources]
             weighted_confidence = max(0.05, min(0.99, weighted_confidence * (sum(factors) / len(factors))))
+            decision_score = max(0.05, min(0.99, decision_score * (sum(factors) / len(factors))))
 
         return {
             "place_name": shop.get("name", "Unknown Place"),
@@ -325,6 +390,10 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
             "match_in_database": "Found" if shop.get("_existing") else "Not Found",
             "predicted_status": status,
             "confidence": round(weighted_confidence, 2),
+            "decision_score": round(decision_score, 2),
+            "digital_footprint_score": round(digital_footprint, 2),
+            "decision_status": shop.get("decision_status"),
+            "signal_breakdown": shop.get("decision_signals", []),
             "confirmed_from": ", ".join(sources) if sources else "single source",
             "recommendation": recommendation,
             "reason": reason,
@@ -360,57 +429,88 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
             active_run_id=run_id,
             status="running",
             stage="fetching",
-            message="Fetching from OSM, data.gov.sg, and OneMap",
+            message="Fetching from OSM, data.gov.sg, OneMap, and digital sources in parallel",
             progress_percent=10,
+            live_change_summary={"new_count": 0, "updated_count": 0, "closed_count": 0},
         )
 
         existing_active_before = get_all_active_shops(limit=100000, offset=0)
 
-        try:
-            osm_data = fetch_osm_shops()
-        except Exception as e:
-            print(f"Warning: Error fetching OSM data: {e}")
-            osm_data = []
-        update_sync_progress(
-            stage="fetching",
-            message="Fetched OpenStreetMap data",
-            source_counts={"osm": len(osm_data), "datagov": 0, "onemap": 0, "total": len(osm_data)},
-            progress_percent=20,
-        )
+        fetch_results = {"osm": [], "datagov": [], "onemap": [], "digital": []}
+        fetch_jobs = {
+            "osm": lambda: fetch_osm_shops(),
+            "datagov": lambda: fetch_datagov_data(collection_id=2, max_records=datagov_max_records),
+            "onemap": lambda: fetch_onemap_shops(),
+            "digital": lambda: fetch_digital_sources(),
+        }
+        completed_fetches = 0
+        total_fetch_jobs = len(fetch_jobs)
 
-        try:
-            datagov_data = fetch_datagov_data(collection_id=2, max_records=datagov_max_records)
-        except Exception as e:
-            print(f"Warning: Error fetching DataGov data: {e}")
-            datagov_data = []
-        update_sync_progress(
-            stage="fetching",
-            message="Fetched data.gov.sg data",
-            source_counts={
-                "osm": len(osm_data),
-                "datagov": len(datagov_data),
-                "onemap": 0,
-                "total": len(osm_data) + len(datagov_data),
-            },
-            progress_percent=30,
-        )
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            future_map = {pool.submit(job): name for name, job in fetch_jobs.items()}
+            for future in as_completed(future_map):
+                name = future_map[future]
+                try:
+                    fetch_results[name] = future.result() or []
+                except Exception as e:
+                    print(f"Warning: Error fetching {name} data: {e}")
+                    fetch_results[name] = []
 
-        try:
-            onemap_data = fetch_onemap_shops()
-        except Exception as e:
-            print(f"Warning: Error fetching OneMap data: {e}")
-            onemap_data = []
+                completed_fetches += 1
+                current_counts = {
+                    "osm": len(fetch_results["osm"]),
+                    "datagov": len(fetch_results["datagov"]),
+                    "onemap": len(fetch_results["onemap"]),
+                    "digital": len(fetch_results["digital"]),
+                }
+                current_counts["total"] = (
+                    current_counts["osm"]
+                    + current_counts["datagov"]
+                    + current_counts["onemap"]
+                    + current_counts["digital"]
+                )
+                fetch_progress = 10 + int((completed_fetches / total_fetch_jobs) * 25)
+                update_sync_progress(
+                    stage="fetching",
+                    message=f"Fetched {name} ({len(fetch_results[name])} records)",
+                    source_counts=current_counts,
+                    progress_percent=fetch_progress,
+                )
+
+        osm_data = fetch_results["osm"]
+        datagov_data = fetch_results["datagov"]
+        onemap_data = fetch_results["onemap"]
+        digital_data = fetch_results["digital"]
         source_counts = {
             "osm": len(osm_data),
             "datagov": len(datagov_data),
             "onemap": len(onemap_data),
-            "total": len(osm_data) + len(datagov_data) + len(onemap_data),
+            "digital": len(digital_data),
+            "total": len(osm_data) + len(datagov_data) + len(onemap_data) + len(digital_data),
         }
-        update_sync_progress(stage="fetching", message="Fetched OneMap data", source_counts=source_counts)
+        update_sync_progress(stage="fetching", message="All sources fetched", source_counts=source_counts, progress_percent=35)
 
         update_sync_progress(stage="normalizing", message="Normalizing source records")
         normalized_datagov = normalize_datagov(datagov_data)
-        all_records = osm_data + normalized_datagov + onemap_data
+        infer_digital = os.getenv("DIGITAL_INFER_FROM_PRIMARY", "true").lower() == "true"
+        if infer_digital and not digital_data:
+            digital_data = _build_inferred_digital_records(osm_data, onemap_data, normalized_datagov)
+            source_counts["digital"] = len(digital_data)
+            source_counts["total"] = (
+                source_counts["osm"]
+                + source_counts["datagov"]
+                + source_counts["onemap"]
+                + source_counts["digital"]
+            )
+            if digital_data:
+                update_sync_progress(
+                    stage="normalizing",
+                    message=f"Digital fallback inferred {len(digital_data)} records from primary sources",
+                    source_counts=source_counts,
+                    progress_percent=40,
+                )
+
+        all_records = osm_data + normalized_datagov + onemap_data + digital_data
 
         if not all_records:
             complete_sync_log(run_id, "failed", "No live source data fetched (all sources empty)")
@@ -427,7 +527,13 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
                     },
                 },
             )
-            update_sync_progress(status="failed", stage="failed", message="No live source data fetched (all sources empty)", progress_percent=100)
+            update_sync_progress(
+                status="failed",
+                stage="failed",
+                message="No live source data fetched (all sources empty)",
+                live_change_summary={"new_count": 0, "updated_count": 0, "closed_count": 0},
+                progress_percent=100,
+            )
             return
 
         update_sync_progress(stage="matching", message="Matching records across sources", progress_percent=45)
@@ -449,8 +555,9 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
                 continue
 
             merged_group = merge_shop_groups(group)
-            confidence_data = calculate_confidence(merged_group)
+            confidence_data = calculate_confidence(merged_group, source_counts=source_counts)
             confidence_score = confidence_data.get("confidence_score", 0)
+            decision_score = confidence_data.get("decision_score", confidence_score)
             shop_data = {
                 "name": merged_group.get("name"),
                 "address": merged_group.get("address"),
@@ -464,7 +571,13 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
                 "postal_code": merged_group.get("postal_code"),
                 "confidence_score": confidence_score,
                 "confidence_level": confidence_data.get("confidence_level", "LOW"),
-                "match_quality": confidence_data.get("confidence_level", "LOW"),
+                "match_quality": confidence_data.get("decision_level", confidence_data.get("confidence_level", "LOW")),
+                "decision_score": decision_score,
+                "decision_level": confidence_data.get("decision_level", "LOW"),
+                "decision_status": confidence_data.get("decision_status", "UNCERTAIN"),
+                "digital_footprint_score": confidence_data.get("digital_footprint_score", 0),
+                "decision_signals": confidence_data.get("digital_signals", []),
+                "decision_reasoning": confidence_data.get("reasoning", []),
                 "raw_data": merged_group.get("all_records", []),
                 "last_updated": datetime.utcnow(),
                 "is_active": True,
@@ -475,8 +588,8 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
 
             if existing_shops:
                 shop_id = existing_shops[0]["_id"]
-                if confidence_score < close_threshold:
-                    update_shop(shop_id, {"is_active": False, "closed_at": datetime.utcnow(), "closure_reason": f"Low confidence ({confidence_score:.1f})"})
+                if decision_score < close_threshold:
+                    update_shop(shop_id, {"is_active": False, "closed_at": datetime.utcnow(), "closure_reason": f"Low decision score ({decision_score:.1f})"})
                     closed_ids.add(shop_id)
                     low_conf_closed_count += 1
                     if len(low_conf_closed) < 30:
@@ -486,11 +599,11 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
                                 "Closed Place",
                                 "Review",
                                 source_counts,
-                                f"Existing DB place confidence {confidence_score:.1f} < {close_threshold}; auto-marked closed.",
+                                f"Existing DB place decision score {decision_score:.1f} < {close_threshold}; marked closed.",
                                 "low_confidence",
                             )
                         )
-                elif confidence_score >= min_confidence:
+                elif decision_score >= min_confidence:
                     update_shop(shop_id, shop_data)
                     updated_count += 1
                     if len(updated_shops) < 30:
@@ -500,11 +613,11 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
                                 "Existing Place",
                                 "Accept",
                                 source_counts,
-                                "Matched an existing active shop in database.",
+                                "Matched existing active shop with healthy decision score.",
                             )
                         )
             else:
-                if confidence_score >= new_threshold:
+                if decision_score >= new_threshold:
                     create_shop(shop_data)
                     new_count += 1
                     if len(new_shops) < 30:
@@ -514,13 +627,24 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
                                 "New Place",
                                 "Review",
                                 source_counts,
-                                f"Not found in DB and confidence {confidence_score:.1f} >= {new_threshold}. data.gov.sg weighted highest for opening signal.",
+                                (
+                                    f"Not found in DB and decision score {decision_score:.1f} >= {new_threshold}. "
+                                    "data.gov.sg contributes highest reliability for opening signal."
+                                ),
                             )
                         )
 
             if (updated_count + new_count) % 100 == 0:
                 progress = 55 + min(25, ((updated_count + new_count) // 100) * 2)
-                update_sync_progress(updated_records=updated_count + new_count, progress_percent=progress)
+                update_sync_progress(
+                    updated_records=updated_count + new_count,
+                    live_change_summary={
+                        "new_count": new_count,
+                        "updated_count": updated_count,
+                        "closed_count": low_conf_closed_count,
+                    },
+                    progress_percent=progress,
+                )
 
         update_sync_progress(stage="closure_check", message="Detecting closed shops", progress_percent=85)
         closed_shops = []
@@ -542,9 +666,22 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
                         "Closed Place",
                         "Review",
                         source_counts,
-                        "Previously active shop not observed in latest multi-source sync. data.gov.sg absence contributes strongest closure signal; low-volume sources are down-weighted.",
+                        (
+                            "Previously active shop not observed in latest multi-source sync. "
+                            "Official-source absence is weighted highest for closure signal."
+                        ),
                         "not_observed",
                     )
+                )
+
+            if missing_closed_count % 100 == 0 and missing_closed_count > 0:
+                update_sync_progress(
+                    live_change_summary={
+                        "new_count": new_count,
+                        "updated_count": updated_count,
+                        "closed_count": low_conf_closed_count + missing_closed_count,
+                    },
+                    progress_percent=90,
                 )
 
         # include low-confidence closed records in closed list/count
@@ -587,6 +724,11 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
             ),
             updated_records=updated_count + new_count,
             scored_records=len(matched_groups),
+            live_change_summary={
+                "new_count": new_count,
+                "updated_count": updated_count,
+                "closed_count": closed_count,
+            },
             progress_percent=100,
         )
         print(f"Realtime update completed: {change_summary}")
@@ -594,7 +736,13 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
     except Exception as e:
         error_msg = str(e)
         complete_sync_log(run_id, "failed", error_msg)
-        update_sync_progress(status="failed", stage="failed", message=error_msg, progress_percent=100)
+        update_sync_progress(
+            status="failed",
+            stage="failed",
+            message=error_msg,
+            live_change_summary={"new_count": 0, "updated_count": 0, "closed_count": 0},
+            progress_percent=100,
+        )
         print(f"Real-time update failed: {error_msg}")
 
 
@@ -611,35 +759,50 @@ async def inspect_data_pipeline(
 
         print("Starting data pipeline inspection...")
 
-        try:
-            osm_raw = fetch_osm_shops()
-        except Exception as e:
-            print(f"Warning: Error fetching OSM data in pipeline: {e}")
-            osm_raw = []
+        raw_fetch = {"osm": [], "datagov": [], "onemap": [], "digital": []}
+        raw_jobs = {
+            "osm": lambda: fetch_osm_shops(),
+            "datagov": lambda: fetch_datagov_data(collection_id=2, max_records=datagov_max_records),
+            "onemap": lambda: fetch_onemap_shops(),
+            "digital": lambda: fetch_digital_sources(),
+        }
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            future_map = {pool.submit(job): name for name, job in raw_jobs.items()}
+            for future in as_completed(future_map):
+                name = future_map[future]
+                try:
+                    raw_fetch[name] = future.result() or []
+                except Exception as e:
+                    print(f"Warning: Error fetching {name} data in pipeline: {e}")
+                    raw_fetch[name] = []
 
-        try:
-            datagov_raw = fetch_datagov_data(collection_id=2, max_records=datagov_max_records)
-        except Exception as e:
-            print(f"Warning: Error fetching DataGov data in pipeline: {e}")
-            datagov_raw = []
-
-        try:
-            onemap_raw = fetch_onemap_shops()
-        except Exception as e:
-            print(f"Warning: Error fetching OneMap data in pipeline: {e}")
-            onemap_raw = []
-
-        total_raw = len(osm_raw) + len(datagov_raw) + len(onemap_raw)
+        osm_raw = raw_fetch["osm"]
+        datagov_raw = raw_fetch["datagov"]
+        onemap_raw = raw_fetch["onemap"]
+        digital_raw = raw_fetch["digital"]
 
         normalized_datagov = normalize_datagov(datagov_raw)
-        all_normalized = osm_raw + normalized_datagov + onemap_raw
+        infer_digital = os.getenv("DIGITAL_INFER_FROM_PRIMARY", "true").lower() == "true"
+        if infer_digital and not digital_raw:
+            digital_raw = _build_inferred_digital_records(osm_raw, onemap_raw, normalized_datagov)
+
+        total_raw = len(osm_raw) + len(datagov_raw) + len(onemap_raw) + len(digital_raw)
+        all_normalized = osm_raw + normalized_datagov + onemap_raw + digital_raw
 
         matched_groups = match_shops(all_normalized)
         merged_groups = [merge_shop_groups(group) for group in matched_groups if group]
 
         final_shops = []
         for group in merged_groups:
-            confidence_data = calculate_confidence(group)
+            confidence_data = calculate_confidence(
+                group,
+                source_counts={
+                    "osm": len(osm_raw),
+                    "datagov": len(datagov_raw),
+                    "onemap": len(onemap_raw),
+                    "digital": len(digital_raw),
+                },
+            )
             confidence_score = confidence_data.get("confidence_score", 0)
             confidence_level = confidence_data.get("confidence_level", "LOW")
             final_shops.append(
@@ -652,6 +815,10 @@ async def inspect_data_pipeline(
                     "shop_type": group.get("shop_type"),
                     "confidence_score": confidence_score,
                     "confidence_level": confidence_level,
+                    "decision_score": confidence_data.get("decision_score", confidence_score),
+                    "decision_level": confidence_data.get("decision_level", confidence_level),
+                    "decision_status": confidence_data.get("decision_status", "UNCERTAIN"),
+                    "digital_footprint_score": confidence_data.get("digital_footprint_score", 0),
                     "raw_records_count": len(group.get("all_records", [])),
                 }
             )
@@ -663,6 +830,7 @@ async def inspect_data_pipeline(
                 "osm": len(osm_raw),
                 "datagov": len(datagov_raw),
                 "onemap": len(onemap_raw),
+                "digital": len(digital_raw),
                 "total": total_raw,
             },
             "stage_2_normalized_count": len(all_normalized),
@@ -725,5 +893,10 @@ if __name__ == "__main__":
 
     port = int(os.getenv("APP_PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+
+
+
 
 

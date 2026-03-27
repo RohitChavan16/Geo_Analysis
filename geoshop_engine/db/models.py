@@ -27,6 +27,12 @@ class ShopDocument(BaseModel):
     confidence_score: float = 0.0
     confidence_level: str = "MEDIUM"
     match_quality: Optional[str] = None
+    decision_score: Optional[float] = None
+    decision_level: Optional[str] = None
+    decision_status: Optional[str] = None
+    digital_footprint_score: Optional[float] = None
+    decision_signals: Optional[List[Dict[str, Any]]] = None
+    decision_reasoning: Optional[List[str]] = None
 
     # Raw data from all sources
     raw_data: Optional[List[Dict[str, Any]]] = None
