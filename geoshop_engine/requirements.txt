@@ -1,0 +1,8 @@
+requests
+sqlalchemy
+schedule
+pymongo
+python-dotenv
+fastapi
+uvicorn
+pydantic
