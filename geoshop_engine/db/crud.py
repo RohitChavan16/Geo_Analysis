@@ -251,6 +251,18 @@ def get_latest_sync_log() -> Optional[Dict[str, Any]]:
         return None
 
 
+def get_sync_log_by_run_id(run_id: str) -> Optional[Dict[str, Any]]:
+    """Get a sync log by run_id."""
+    db = get_database()
+    sync_logs_collection: Collection = db.sync_logs
+
+    try:
+        return sync_logs_collection.find_one({"run_id": run_id})
+    except Exception as e:
+        print(f"Error getting sync log by run_id: {e}")
+        return None
+
+
 def get_sync_logs(limit: int = 10) -> List[Dict[str, Any]]:
     """Get recent sync logs."""
     db = get_database()

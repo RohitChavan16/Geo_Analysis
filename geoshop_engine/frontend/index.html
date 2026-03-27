@@ -167,6 +167,78 @@
             box-shadow: 0 4px 12px rgba(102, 126, 234, 0.15);
         }
 
+        .change-card {
+            border: 1px solid #dfe6ef;
+            border-radius: 10px;
+            background: #f9fbff;
+            padding: 14px;
+        }
+
+        .change-card b {
+            color: #1f3347;
+        }
+
+        .change-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .change-summary-item {
+            background: #f4f7fb;
+            border: 1px solid #d6dfeb;
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+        }
+
+        .change-summary-number {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: #2f4a68;
+        }
+
+        .status-badge {
+            display: inline-block;
+            border-radius: 14px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 3px 10px;
+            border: 1px solid;
+        }
+
+        .status-new {
+            color: #0b6b50;
+            background: #ddf9ef;
+            border-color: #8de6bf;
+        }
+
+        .status-closed {
+            color: #94231d;
+            background: #ffe3e1;
+            border-color: #ffb7b2;
+        }
+
+        .status-existing {
+            color: #6b4a0b;
+            background: #fff2d7;
+            border-color: #ffd68a;
+        }
+
+        .confidence-pill {
+            display: inline-block;
+            margin-left: 6px;
+            border-radius: 12px;
+            padding: 2px 8px;
+            font-size: 0.75rem;
+            font-weight: 700;
+        }
+
+        .conf-high { background: #d9fbe9; color: #0f6b44; }
+        .conf-med { background: #fff3db; color: #8a5b0a; }
+        .conf-low { background: #ffe3e0; color: #972d26; }
+
         .shop-header {
             display: flex;
             justify-content: space-between;
@@ -622,6 +694,31 @@
             <button id="clear-filters" class="btn">Clear</button>
         </div>
 
+        <div class="shops-container" style="margin-bottom: 20px;">
+            <h3>Real-time Change Feed</h3>
+            <p style="color:#555; margin-bottom: 12px;">New openings and closures detected in the latest sync.</p>
+            <div class="change-summary-grid">
+                <div class="change-summary-item">
+                    <div id="change-new-count" class="change-summary-number">0</div>
+                    <div>Open (New)</div>
+                </div>
+                <div class="change-summary-item">
+                    <div id="change-updated-count" class="change-summary-number">0</div>
+                    <div>Updated</div>
+                </div>
+                <div class="change-summary-item">
+                    <div id="change-closed-count" class="change-summary-number">0</div>
+                    <div>Closed</div>
+                </div>
+                <div class="change-summary-item">
+                    <div id="change-total-count" class="change-summary-number">0</div>
+                    <div>Total Changes</div>
+                </div>
+            </div>
+            <div id="changes-summary" style="margin-bottom: 12px; color:#2d3748;">No changes loaded yet.</div>
+            <div id="changes-grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px;"></div>
+        </div>
+
         <!-- Shops List -->
         <div class="shops-container">
             <h3>🏪 Shops</h3>
@@ -762,6 +859,14 @@
         const progressDatagov = document.getElementById('progress-datagov');
         const progressOnemap = document.getElementById('progress-onemap');
         const progressTotal = document.getElementById('progress-total');
+        const changesSummary = document.getElementById('changes-summary');
+        const changesGrid = document.getElementById('changes-grid');
+        const changeNewCount = document.getElementById('change-new-count');
+        const changeUpdatedCount = document.getElementById('change-updated-count');
+        const changeClosedCount = document.getElementById('change-closed-count');
+        const changeTotalCount = document.getElementById('change-total-count');
+        let latestProgressRunId = null;
+        let lastRenderedChangesRunId = null;
 
         // Buttons
         const refreshBtn = document.getElementById('refresh-btn');
@@ -852,6 +957,7 @@
             try {
                 const response = await fetch(`${API_BASE}/sync/progress`);
                 const progress = await response.json();
+                latestProgressRunId = progress.active_run_id || latestProgressRunId;
 
                 const counts = progress.source_counts || {};
                 progressOsm.textContent = counts.osm || 0;
@@ -863,6 +969,10 @@
                 const stage = progress.stage || 'idle';
                 const message = progress.message || 'No sync running';
                 liveProgressText.textContent = `[${status.toUpperCase()} | ${stage}] ${message}`;
+
+                if ((status === 'success' || status === 'failed') && latestProgressRunId && latestProgressRunId !== lastRenderedChangesRunId) {
+                    showChanges(latestProgressRunId);
+                }
             } catch (error) {
                 console.error('Error fetching sync progress:', error);
             }
@@ -886,6 +996,13 @@
                 const response = await fetch(`${API_BASE}/shops?${params}`);
                 const shops = await response.json();
 
+                if (!response.ok) {
+                    throw new Error(shops?.detail || `HTTP ${response.status}`);
+                }
+                if (!Array.isArray(shops)) {
+                    throw new Error('Unexpected shops payload (expected array)');
+                }
+
                 shopsList.className = '';
                 shopsList.innerHTML = '';
 
@@ -900,7 +1017,7 @@
 
             } catch (error) {
                 console.error('Error fetching shops:', error);
-                shopsList.innerHTML = '<p>Error loading shops. Please try again.</p>';
+                shopsList.innerHTML = `<p>Error loading shops: ${error.message || 'Unknown error'}</p>`;
                 showAlert('Failed to load shops', 'error');
             }
         }
@@ -957,21 +1074,80 @@
             }
         }
 
-        async function showChanges() {
+        function renderChangeCard(item) {
+            const coords = item.coordinates || { lat: item.lat, lng: item.lng };
+            const lat = coords.lat !== undefined && coords.lat !== null ? Number(coords.lat).toFixed(6) : 'N/A';
+            const lng = coords.lng !== undefined && coords.lng !== null ? Number(coords.lng).toFixed(6) : 'N/A';
+            const confidence = item.confidence !== undefined ? item.confidence : ((item.confidence_score || 0) / 100.0);
+            const status = item.predicted_status || 'Detected Change';
+            const statusClass = status === 'Closed Place' ? 'status-closed' : (status === 'Existing Place' ? 'status-existing' : 'status-new');
+            const confClass = confidence >= 0.8 ? 'conf-high' : (confidence >= 0.6 ? 'conf-med' : 'conf-low');
+            const confLabel = confidence >= 0.8 ? 'High' : (confidence >= 0.6 ? 'Medium' : 'Low');
+
+            return `
+                <div class="change-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                        <div style="font-size:1.05rem; font-weight:700;">${item.place_name || item.name || 'Unknown Place'}</div>
+                        <div>
+                            <span class="status-badge ${statusClass}">${status}</span>
+                            <span class="confidence-pill ${confClass}">${confLabel}</span>
+                        </div>
+                    </div>
+                    <div><b>Address:</b> ${item.address || 'Unknown Address'}</div>
+                    <div><b>Category:</b> ${item.category || item.shop_type || 'general'}</div>
+                    <div><b>Coordinates:</b> ${lat}, ${lng}</div>
+                    <div><b>Match in Database:</b> ${item.match_in_database || 'Found'}</div>
+                    <div><b>Confidence:</b> ${confidence}</div>
+                    <div><b>Confirmed From:</b> ${item.confirmed_from || 'Unknown'}</div>
+                    <div><b>Reason:</b> ${item.reason || 'No explicit reason provided'}</div>
+                    <div><b>Recommendation:</b> ${item.recommendation || 'Review'} (Review / Reject / Accept)</div>
+                    <div><b>Sources:</b> ${(item.sources || []).join(', ') || 'Unknown'}</div>
+                    ${item.phone ? `<div><b>Phone:</b> ${item.phone}</div>` : ''}
+                    ${item.website ? `<div><b>Website:</b> ${item.website}</div>` : ''}
+                    ${item.opening_hours ? `<div><b>Opening Hours:</b> ${item.opening_hours}</div>` : ''}
+                    ${item.postal_code ? `<div><b>Postal Code:</b> ${item.postal_code}</div>` : ''}
+                </div>
+            `;
+        }
+
+        async function showChanges(runId = null) {
             try {
-                const response = await fetch(`${API_BASE}/sync/changes`);
+                const endpoint = runId ? `${API_BASE}/sync/changes?run_id=${encodeURIComponent(runId)}` : `${API_BASE}/sync/changes`;
+                const response = await fetch(endpoint);
                 const changes = await response.json();
 
-                const message = `Changes since last sync:\n• ${changes.new_count} new shops\n• ${changes.closed_count} closed shops`;
-                showAlert(message, 'info');
-
-                // Optionally show detailed changes
-                if (changes.new_shops.length > 0 || changes.closed_shops.length > 0) {
-                    setTimeout(() => fetchShops(), 1000);
+                const newShops = changes.new_shops || [];
+                const closedShops = changes.closed_shops || [];
+                const updatedShops = changes.updated_shops || [];
+                const runLabel = changes.run_id || 'latest';
+                if (changes.run_id) {
+                    lastRenderedChangesRunId = changes.run_id;
                 }
+
+                const newCount = changes.new_count || 0;
+                const updatedCount = changes.updated_count || 0;
+                const closedCount = changes.closed_count || 0;
+                const totalCount = newCount + updatedCount + closedCount;
+                changeNewCount.textContent = newCount;
+                changeUpdatedCount.textContent = updatedCount;
+                changeClosedCount.textContent = closedCount;
+                changeTotalCount.textContent = totalCount;
+
+                changesSummary.textContent = `Run ${runLabel}: ${newCount} new, ${updatedCount} updated, ${closedCount} closed.`;
+
+                const cards = []
+                    .concat(newShops.map(s => renderChangeCard(s)))
+                    .concat(closedShops.map(s => renderChangeCard(s)))
+                    .concat(updatedShops.map(s => renderChangeCard(s)));
+
+                changesGrid.innerHTML = cards.length ? cards.join('') : '<div style="color:#666;">No shop-level changes detected for this sync.</div>';
 
             } catch (error) {
                 console.error('Error fetching changes:', error);
+                changeNewCount.textContent = '0';
+                changeUpdatedCount.textContent = '0';
+                changeClosedCount.textContent = '0';
+                changeTotalCount.textContent = '0';
                 showAlert('Failed to fetch changes', 'error');
             }
         }
@@ -979,7 +1155,9 @@
         // Event Listeners
         refreshBtn.addEventListener('click', () => {
             fetchStats();
+            fetchSyncProgress();
             fetchShops();
+            showChanges(latestProgressRunId);
         });
 
         syncBtn.addEventListener('click', triggerSync);
@@ -1156,6 +1334,7 @@
             fetchSyncProgress();
             fetchShops();
             fetchPipelineData();
+            showChanges();
         });
 
         // Auto-refresh stats every 10 seconds

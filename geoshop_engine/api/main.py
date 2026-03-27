@@ -12,18 +12,21 @@ from db.crud import (
     complete_sync_log,
     count_shops,
     create_sync_log,
-    detect_closed_shops_since_last_sync,
-    detect_new_shops_since_last_sync,
+    create_shop,
+    find_similar_shops,
     get_all_active_shops,
     get_high_confidence_shops,
     get_shop,
+    get_sync_log_by_run_id,
+    get_latest_sync_log,
     get_shops_by_location,
     get_shops_by_name,
     get_sync_status,
+    update_shop,
+    update_sync_log,
 )
 from db.models import ShopResponse
-from main import run_pipeline
-from processors.matcher import match_shops, merge_shop_groups
+from processors.matcher import match_shops, merge_shop_groups, calculate_distance, string_similarity
 from processors.normalizer import normalize_datagov
 from signal_engine.signal_calculator import calculate_confidence
 from data_fetchers.datagov_fetcher import fetch_datagov_data
@@ -60,6 +63,22 @@ SYNC_PROGRESS = {
 }
 
 
+def _to_shop_response_payload(shop: dict) -> dict:
+    """Normalize DB document shape to ShopResponse payload."""
+    return {
+        "id": str(shop.get("_id") or shop.get("id") or ""),
+        "name": shop.get("name") or "Unknown Shop",
+        "address": shop.get("address"),
+        "lat": float(shop.get("lat") or 0),
+        "lng": float(shop.get("lng") or 0),
+        "sources": shop.get("sources") or [],
+        "confidence_score": float(shop.get("confidence_score") or 0),
+        "confidence_level": shop.get("confidence_level") or "LOW",
+        "is_active": bool(shop.get("is_active", True)),
+        "last_updated": shop.get("last_updated") or datetime.utcnow(),
+    }
+
+
 @app.on_event("startup")
 async def startup_event():
     success = init_database()
@@ -94,7 +113,7 @@ async def get_shops(
             shops = get_high_confidence_shops(min_confidence, limit)
         else:
             shops = get_all_active_shops(limit, offset)
-        return [ShopResponse(**shop) for shop in shops]
+        return [ShopResponse(**_to_shop_response_payload(shop)) for shop in shops]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching shops: {e}")
 
@@ -120,7 +139,7 @@ async def get_shop_by_id(shop_id: str):
     shop = get_shop(shop_id)
     if not shop:
         raise HTTPException(status_code=404, detail="Shop not found")
-    return ShopResponse(**shop)
+    return ShopResponse(**_to_shop_response_payload(shop))
 
 
 @app.get("/api/sync/status")
@@ -137,15 +156,36 @@ async def get_sync_progress():
 
 
 @app.get("/api/sync/changes")
-async def get_sync_changes():
+async def get_sync_changes(run_id: Optional[str] = Query(None, description="Specific run_id; defaults to latest sync")):
     try:
-        new_shops = detect_new_shops_since_last_sync()
-        closed_shops = detect_closed_shops_since_last_sync()
+        sync_log = get_sync_log_by_run_id(run_id) if run_id else get_latest_sync_log()
+        if not sync_log:
+            return {
+                "run_id": None,
+                "new_count": 0,
+                "closed_count": 0,
+                "updated_count": 0,
+                "new_shops": [],
+                "closed_shops": [],
+                "updated_shops": [],
+                "source_counts": {"osm": 0, "datagov": 0, "onemap": 0, "total": 0},
+            }
+
+        change_summary = sync_log.get("change_summary", {})
+        source_counts = sync_log.get("source_counts", {"osm": 0, "datagov": 0, "onemap": 0, "total": 0})
+
         return {
-            "new_shops": [ShopResponse(**shop) for shop in new_shops],
-            "closed_shops": [ShopResponse(**shop) for shop in closed_shops],
-            "new_count": len(new_shops),
-            "closed_count": len(closed_shops),
+            "run_id": sync_log.get("run_id"),
+            "started_at": sync_log.get("started_at"),
+            "completed_at": sync_log.get("completed_at"),
+            "status": sync_log.get("status"),
+            "new_count": change_summary.get("new_count", 0),
+            "closed_count": change_summary.get("closed_count", 0),
+            "updated_count": change_summary.get("updated_count", 0),
+            "new_shops": sync_log.get("new_shops", []),
+            "closed_shops": sync_log.get("closed_shops", []),
+            "updated_shops": sync_log.get("updated_shops", []),
+            "source_counts": source_counts,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting sync changes: {e}")
@@ -178,22 +218,8 @@ async def trigger_sync(background_tasks: BackgroundTasks):
 
 def run_sync_pipeline(run_id: str):
     try:
-        update_sync_progress(
-            active_run_id=run_id,
-            status="running",
-            stage="pipeline",
-            message="Running full pipeline",
-        )
-        stats = run_pipeline()
-        complete_sync_log(run_id, "success")
-        update_sync_progress(
-            active_run_id=run_id,
-            status="success" if stats.get("success") else "failed",
-            stage="completed",
-            message="Sync completed" if stats.get("success") else stats.get("error", "Sync failed"),
-            updated_records=stats.get("stored_count", 0),
-        )
-        print(f"Sync completed successfully: {stats}")
+        min_confidence = float(os.getenv("MIN_CONFIDENCE_UPDATE", "50.0"))
+        run_realtime_update_pipeline(run_id, min_confidence)
     except Exception as e:
         error_msg = str(e)
         complete_sync_log(run_id, "failed", error_msg)
@@ -240,7 +266,59 @@ async def trigger_realtime_update(
 
 
 def run_realtime_update_pipeline(run_id: str, min_confidence: float):
+    def _source_weight_factor(source_name: str, source_counts: dict) -> float:
+        # Base reliability. Give higher weight to data.gov.sg for closure/opening confidence.
+        base = {"data_gov": 1.0, "datagov": 1.0, "onemap": 0.8, "osm": 0.6}.get(source_name, 0.5)
+        count = source_counts.get(source_name) or source_counts.get("datagov" if source_name == "data_gov" else source_name) or 0
+        # If a source fetched very little data this run, down-weight its evidence.
+        if count < 10:
+            return base * 0.5
+        if count < 50:
+            return base * 0.75
+        return base
+
+    def _format_change(shop: dict, status: str, recommendation: str, source_counts: dict, reason: str) -> dict:
+        sources = shop.get("sources", [])
+        weighted_confidence = float(shop.get("confidence_score", 0)) / 100.0
+        if sources:
+            factors = [_source_weight_factor(s, source_counts) for s in sources]
+            weighted_confidence = max(0.05, min(0.99, weighted_confidence * (sum(factors) / len(factors))))
+
+        return {
+            "place_name": shop.get("name", "Unknown Place"),
+            "address": shop.get("address", "Unknown Address"),
+            "category": shop.get("shop_type") or "general",
+            "coordinates": {"lat": shop.get("lat"), "lng": shop.get("lng")},
+            "match_in_database": "Found" if shop.get("_existing") else "Not Found",
+            "predicted_status": status,
+            "confidence": round(weighted_confidence, 2),
+            "confirmed_from": ", ".join(sources) if sources else "single source",
+            "recommendation": recommendation,
+            "reason": reason,
+            "sources": sources,
+            "phone": shop.get("phone"),
+            "website": shop.get("website"),
+            "opening_hours": shop.get("opening_hours"),
+            "postal_code": shop.get("postal_code"),
+            "last_updated": datetime.utcnow().isoformat(),
+        }
+
+    def _exists_in_observed(db_shop: dict, observed: list) -> bool:
+        for current in observed:
+            try:
+                dist = calculate_distance(db_shop.get("lat"), db_shop.get("lng"), current.get("lat"), current.get("lng"))
+            except Exception:
+                continue
+            if dist > 0.07:
+                continue
+            name_sim = string_similarity(db_shop.get("name", ""), current.get("name", ""))
+            addr_sim = string_similarity(db_shop.get("address", ""), current.get("address", ""))
+            if name_sim >= 0.6 or addr_sim >= 0.65:
+                return True
+        return False
+
     try:
+        datagov_max_records = int(os.getenv("DATA_GOV_MAX_RECORDS", "1000"))
         print("Fetching fresh data from all sources...")
         update_sync_progress(
             active_run_id=run_id,
@@ -248,6 +326,8 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
             stage="fetching",
             message="Fetching from OSM, data.gov.sg, and OneMap",
         )
+
+        existing_active_before = get_all_active_shops(limit=100000, offset=0)
 
         try:
             osm_data = fetch_osm_shops()
@@ -257,16 +337,11 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
         update_sync_progress(
             stage="fetching",
             message="Fetched OpenStreetMap data",
-            source_counts={
-                "osm": len(osm_data),
-                "datagov": 0,
-                "onemap": 0,
-                "total": len(osm_data),
-            },
+            source_counts={"osm": len(osm_data), "datagov": 0, "onemap": 0, "total": len(osm_data)},
         )
 
         try:
-            datagov_data = fetch_datagov_data(collection_id=2, max_records=1000)
+            datagov_data = fetch_datagov_data(collection_id=2, max_records=datagov_max_records)
         except Exception as e:
             print(f"Warning: Error fetching DataGov data: {e}")
             datagov_data = []
@@ -286,16 +361,13 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
         except Exception as e:
             print(f"Warning: Error fetching OneMap data: {e}")
             onemap_data = []
-        update_sync_progress(
-            stage="fetching",
-            message="Fetched OneMap data",
-            source_counts={
-                "osm": len(osm_data),
-                "datagov": len(datagov_data),
-                "onemap": len(onemap_data),
-                "total": len(osm_data) + len(datagov_data) + len(onemap_data),
-            },
-        )
+        source_counts = {
+            "osm": len(osm_data),
+            "datagov": len(datagov_data),
+            "onemap": len(onemap_data),
+            "total": len(osm_data) + len(datagov_data) + len(onemap_data),
+        }
+        update_sync_progress(stage="fetching", message="Fetched OneMap data", source_counts=source_counts)
 
         update_sync_progress(stage="normalizing", message="Normalizing source records")
         normalized_datagov = normalize_datagov(datagov_data)
@@ -303,20 +375,21 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
 
         if not all_records:
             complete_sync_log(run_id, "failed", "No live source data fetched (all sources empty)")
-            update_sync_progress(
-                status="failed",
-                stage="failed",
-                message="No live source data fetched (all sources empty)",
-            )
-            print("Real-time update failed: all source fetches returned empty")
+            update_sync_log(run_id, {"source_counts": source_counts, "change_summary": {"new_count": 0, "closed_count": 0, "updated_count": 0}})
+            update_sync_progress(status="failed", stage="failed", message="No live source data fetched (all sources empty)")
             return
 
         update_sync_progress(stage="matching", message="Matching records across sources")
         matched_groups = match_shops(all_records)
         update_sync_progress(matched_groups=len(matched_groups))
-        updates_made = 0
 
         update_sync_progress(stage="scoring", message="Scoring and storing matched groups")
+        observed_records = []
+        new_shops = []
+        updated_shops = []
+        new_count = 0
+        updated_count = 0
+
         for group in matched_groups:
             if not group:
                 continue
@@ -346,42 +419,95 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
                 "is_active": True,
             }
 
-            from db.crud import create_shop, find_similar_shops, update_shop
-
-            existing_shops = find_similar_shops(
-                shop_data["name"],
-                shop_data["lat"],
-                shop_data["lng"],
-            )
+            observed_records.append(shop_data)
+            existing_shops = find_similar_shops(shop_data["name"], shop_data["lat"], shop_data["lng"])
 
             if existing_shops:
                 shop_id = existing_shops[0]["_id"]
                 update_shop(shop_id, shop_data)
+                updated_count += 1
+                if len(updated_shops) < 30:
+                    updated_shops.append(
+                        _format_change(
+                            {**shop_data, "_existing": True},
+                            "Existing Place",
+                            "Accept",
+                            source_counts,
+                            "Matched an existing active shop in database.",
+                        )
+                    )
             else:
                 create_shop(shop_data)
+                new_count += 1
+                if len(new_shops) < 30:
+                    new_shops.append(
+                        _format_change(
+                            {**shop_data, "_existing": False},
+                            "New Place",
+                            "Review",
+                            source_counts,
+                            "Not found in active DB within spatial/name threshold. data.gov.sg evidence weighted highest for opening confidence.",
+                        )
+                    )
 
-            updates_made += 1
-            if updates_made % 100 == 0:
-                update_sync_progress(updated_records=updates_made)
+            if (updated_count + new_count) % 100 == 0:
+                update_sync_progress(updated_records=updated_count + new_count)
 
-        complete_sync_log(run_id, "success", f"Updated {updates_made} shops with confidence >= {min_confidence}%")
+        update_sync_progress(stage="closure_check", message="Detecting closed shops")
+        closed_shops = []
+        closed_count = 0
+        for old_shop in existing_active_before:
+            if not old_shop.get("is_active", True):
+                continue
+            if _exists_in_observed(old_shop, observed_records):
+                continue
+            update_shop(old_shop.get("_id"), {"is_active": False, "closed_at": datetime.utcnow()})
+            closed_count += 1
+            if len(closed_shops) < 30:
+                old_shop["confidence_score"] = old_shop.get("confidence_score", 0)
+                closed_shops.append(
+                    _format_change(
+                        {**old_shop, "_existing": True},
+                        "Closed Place",
+                        "Review",
+                        source_counts,
+                        "Previously active shop not observed in latest multi-source sync. data.gov.sg absence contributes strongest closure signal; low-volume sources are down-weighted.",
+                    )
+                )
+
+        change_summary = {
+            "new_count": new_count,
+            "closed_count": closed_count,
+            "updated_count": updated_count,
+        }
+        update_sync_log(
+            run_id,
+            {
+                "source_counts": source_counts,
+                "change_summary": change_summary,
+                "new_shops": new_shops,
+                "closed_shops": closed_shops,
+                "updated_shops": updated_shops,
+                "total_raw": source_counts["total"],
+                "total_matched": len(matched_groups),
+                "total_stored": updated_count + new_count,
+            },
+        )
+
+        complete_sync_log(run_id, "success", f"new={new_count}, updated={updated_count}, closed={closed_count}")
         update_sync_progress(
             status="success",
             stage="completed",
-            message=f"Realtime update completed ({updates_made} records updated)",
-            updated_records=updates_made,
+            message=f"Completed: {new_count} new, {updated_count} updated, {closed_count} closed",
+            updated_records=updated_count + new_count,
             scored_records=len(matched_groups),
         )
-        print(f"Real-time update completed: {updates_made} shops updated")
+        print(f"Realtime update completed: {change_summary}")
 
     except Exception as e:
         error_msg = str(e)
         complete_sync_log(run_id, "failed", error_msg)
-        update_sync_progress(
-            status="failed",
-            stage="failed",
-            message=error_msg,
-        )
+        update_sync_progress(status="failed", stage="failed", message=error_msg)
         print(f"Real-time update failed: {error_msg}")
 
 
@@ -390,6 +516,7 @@ async def inspect_data_pipeline(
     refresh: bool = Query(False, description="Force refresh instead of returning cached debug payload")
 ):
     try:
+        datagov_max_records = int(os.getenv("DATA_GOV_MAX_RECORDS", "1000"))
         now = datetime.utcnow()
         cached_at = PIPELINE_DEBUG_CACHE.get("at")
         if not refresh and cached_at and (now - cached_at) < PIPELINE_DEBUG_CACHE_TTL:
@@ -404,7 +531,7 @@ async def inspect_data_pipeline(
             osm_raw = []
 
         try:
-            datagov_raw = fetch_datagov_data(collection_id=2, max_records=1000)
+            datagov_raw = fetch_datagov_data(collection_id=2, max_records=datagov_max_records)
         except Exception as e:
             print(f"Warning: Error fetching DataGov data in pipeline: {e}")
             datagov_raw = []
