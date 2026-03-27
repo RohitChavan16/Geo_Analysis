@@ -178,6 +178,34 @@
             color: #1f3347;
         }
 
+        .progress-wrap {
+            margin-top: 10px;
+        }
+
+        .progress-track {
+            width: 100%;
+            height: 12px;
+            background: #e8edf5;
+            border-radius: 999px;
+            overflow: hidden;
+            border: 1px solid #d6dfeb;
+        }
+
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #4f83ff, #33b68a);
+            transition: width 0.4s ease;
+        }
+
+        .progress-label {
+            margin-top: 6px;
+            font-size: 0.85rem;
+            color: #3c4d63;
+            text-align: right;
+            font-weight: 700;
+        }
+
         .change-summary-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -238,6 +266,23 @@
         .conf-high { background: #d9fbe9; color: #0f6b44; }
         .conf-med { background: #fff3db; color: #8a5b0a; }
         .conf-low { background: #ffe3e0; color: #972d26; }
+
+        .history-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+
+        .history-table th, .history-table td {
+            border-bottom: 1px solid #e3e8f0;
+            padding: 10px 8px;
+            text-align: left;
+        }
+
+        .history-table th {
+            background: #f4f7fb;
+            color: #31465e;
+        }
 
         .shop-header {
             display: flex;
@@ -655,6 +700,12 @@
         <div class="card" style="margin-bottom: 20px;">
             <h3>Live Sync Progress</h3>
             <div id="live-progress-text" style="margin-bottom: 10px; color: #2d3748;">No sync running</div>
+            <div class="progress-wrap">
+                <div class="progress-track">
+                    <div id="sync-progress-fill" class="progress-fill"></div>
+                </div>
+                <div id="sync-progress-label" class="progress-label">0%</div>
+            </div>
             <div class="stats-grid">
                 <div class="stat-item">
                     <span id="progress-osm" class="stat-number">0</span>
@@ -672,6 +723,31 @@
                     <span id="progress-total" class="stat-number">0</span>
                     <div class="stat-label">Total</div>
                 </div>
+            </div>
+        </div>
+
+        <div class="shops-container" style="margin-bottom: 20px;">
+            <h3>Sync History</h3>
+            <div id="sync-history-container" style="overflow-x:auto;">
+                <table class="history-table">
+                    <thead>
+                        <tr>
+                            <th>Run ID</th>
+                            <th>Status</th>
+                            <th>Started</th>
+                            <th>Completed</th>
+                            <th>New</th>
+                            <th>Updated</th>
+                            <th>Closed</th>
+                            <th>Closed (Low)</th>
+                            <th>Closed (Missing)</th>
+                            <th>Total Source Records</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sync-history-body">
+                        <tr><td colspan="10">No sync history yet.</td></tr>
+                    </tbody>
+                </table>
             </div>
         </div>
 
@@ -709,6 +785,14 @@
                 <div class="change-summary-item">
                     <div id="change-closed-count" class="change-summary-number">0</div>
                     <div>Closed</div>
+                </div>
+                <div class="change-summary-item">
+                    <div id="change-closed-low-conf-count" class="change-summary-number">0</div>
+                    <div>Closed (Low Conf)</div>
+                </div>
+                <div class="change-summary-item">
+                    <div id="change-closed-missing-count" class="change-summary-number">0</div>
+                    <div>Closed (Missing)</div>
                 </div>
                 <div class="change-summary-item">
                     <div id="change-total-count" class="change-summary-number">0</div>
@@ -859,11 +943,16 @@
         const progressDatagov = document.getElementById('progress-datagov');
         const progressOnemap = document.getElementById('progress-onemap');
         const progressTotal = document.getElementById('progress-total');
+        const syncProgressFill = document.getElementById('sync-progress-fill');
+        const syncProgressLabel = document.getElementById('sync-progress-label');
+        const syncHistoryBody = document.getElementById('sync-history-body');
         const changesSummary = document.getElementById('changes-summary');
         const changesGrid = document.getElementById('changes-grid');
         const changeNewCount = document.getElementById('change-new-count');
         const changeUpdatedCount = document.getElementById('change-updated-count');
         const changeClosedCount = document.getElementById('change-closed-count');
+        const changeClosedLowConfCount = document.getElementById('change-closed-low-conf-count');
+        const changeClosedMissingCount = document.getElementById('change-closed-missing-count');
         const changeTotalCount = document.getElementById('change-total-count');
         let latestProgressRunId = null;
         let lastRenderedChangesRunId = null;
@@ -969,12 +1058,49 @@
                 const stage = progress.stage || 'idle';
                 const message = progress.message || 'No sync running';
                 liveProgressText.textContent = `[${status.toUpperCase()} | ${stage}] ${message}`;
+                const pct = Math.max(0, Math.min(100, Number(progress.progress_percent || 0)));
+                syncProgressFill.style.width = `${pct}%`;
+                syncProgressLabel.textContent = `${pct.toFixed(0)}%`;
 
                 if ((status === 'success' || status === 'failed') && latestProgressRunId && latestProgressRunId !== lastRenderedChangesRunId) {
                     showChanges(latestProgressRunId);
+                    fetchSyncHistory();
                 }
             } catch (error) {
                 console.error('Error fetching sync progress:', error);
+            }
+        }
+
+        async function fetchSyncHistory() {
+            try {
+                const response = await fetch(`${API_BASE}/sync/history?limit=20`);
+                const payload = await response.json();
+                const history = payload.history || [];
+
+                if (!history.length) {
+                    syncHistoryBody.innerHTML = '<tr><td colspan="10">No sync history yet.</td></tr>';
+                    return;
+                }
+
+                syncHistoryBody.innerHTML = history.map(item => {
+                    const total = item.source_counts?.total || 0;
+                    return `
+                        <tr>
+                            <td>${item.run_id || '-'}</td>
+                            <td>${item.status || '-'}</td>
+                            <td>${formatDate(item.started_at)}</td>
+                            <td>${formatDate(item.completed_at)}</td>
+                            <td>${item.new_count || 0}</td>
+                            <td>${item.updated_count || 0}</td>
+                            <td>${item.closed_count || 0}</td>
+                            <td>${item.closed_low_conf_count || 0}</td>
+                            <td>${item.closed_missing_count || 0}</td>
+                            <td>${total}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('Error fetching sync history:', error);
             }
         }
 
@@ -1100,6 +1226,7 @@
                     <div><b>Confidence:</b> ${confidence}</div>
                     <div><b>Confirmed From:</b> ${item.confirmed_from || 'Unknown'}</div>
                     <div><b>Reason:</b> ${item.reason || 'No explicit reason provided'}</div>
+                    ${item.closure_type ? `<div><b>Closure Type:</b> ${item.closure_type}</div>` : ''}
                     <div><b>Recommendation:</b> ${item.recommendation || 'Review'} (Review / Reject / Accept)</div>
                     <div><b>Sources:</b> ${(item.sources || []).join(', ') || 'Unknown'}</div>
                     ${item.phone ? `<div><b>Phone:</b> ${item.phone}</div>` : ''}
@@ -1127,13 +1254,17 @@
                 const newCount = changes.new_count || 0;
                 const updatedCount = changes.updated_count || 0;
                 const closedCount = changes.closed_count || 0;
+                const closedLowConfCount = changes.closed_low_conf_count || 0;
+                const closedMissingCount = changes.closed_missing_count || 0;
                 const totalCount = newCount + updatedCount + closedCount;
                 changeNewCount.textContent = newCount;
                 changeUpdatedCount.textContent = updatedCount;
                 changeClosedCount.textContent = closedCount;
+                changeClosedLowConfCount.textContent = closedLowConfCount;
+                changeClosedMissingCount.textContent = closedMissingCount;
                 changeTotalCount.textContent = totalCount;
 
-                changesSummary.textContent = `Run ${runLabel}: ${newCount} new, ${updatedCount} updated, ${closedCount} closed.`;
+                changesSummary.textContent = `Run ${runLabel}: ${newCount} new, ${updatedCount} updated, ${closedCount} closed (low=${closedLowConfCount}, missing=${closedMissingCount}).`;
 
                 const cards = []
                     .concat(newShops.map(s => renderChangeCard(s)))
@@ -1147,6 +1278,8 @@
                 changeNewCount.textContent = '0';
                 changeUpdatedCount.textContent = '0';
                 changeClosedCount.textContent = '0';
+                changeClosedLowConfCount.textContent = '0';
+                changeClosedMissingCount.textContent = '0';
                 changeTotalCount.textContent = '0';
                 showAlert('Failed to fetch changes', 'error');
             }
@@ -1156,6 +1289,7 @@
         refreshBtn.addEventListener('click', () => {
             fetchStats();
             fetchSyncProgress();
+            fetchSyncHistory();
             fetchShops();
             showChanges(latestProgressRunId);
         });
@@ -1332,8 +1466,8 @@
         document.addEventListener('DOMContentLoaded', () => {
             fetchStats();
             fetchSyncProgress();
+            fetchSyncHistory();
             fetchShops();
-            fetchPipelineData();
             showChanges();
         });
 
@@ -1341,8 +1475,8 @@
         setInterval(fetchStats, 10000);
         // Auto-refresh sync progress every 5 seconds
         setInterval(fetchSyncProgress, 5000);
-        // Auto-refresh pipeline data every 60 seconds
-        setInterval(fetchPipelineData, 60000);
+        // Sync history refresh every 20 seconds
+        setInterval(fetchSyncHistory, 20000);
     </script>
 </body>
 </html>

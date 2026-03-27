@@ -3,6 +3,8 @@ from typing import Dict, List
 
 import requests
 
+from processors.category_filter import map_osm_category
+
 OVERPASS_API_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -21,7 +23,7 @@ def get_mock_osm_data() -> List[Dict]:
             "lng": 103.7623,
             "phone": "+65 6777 1234",
             "opening_hours": "09:00-21:00",
-            "shop_type": "general",
+            "shop_type": "grocery_store",
             "source": "osm",
         },
         {
@@ -31,26 +33,45 @@ def get_mock_osm_data() -> List[Dict]:
             "lng": 103.7425,
             "phone": "+65 6898 5678",
             "opening_hours": "10:00-22:00",
-            "shop_type": "general",
+            "shop_type": "shopping_mall",
             "source": "osm",
         },
     ]
 
 
 def fetch_osm_shops(use_mock: bool = False, allow_mock_fallback: bool = False) -> List[Dict]:
-    """Fetch shops from OpenStreetMap using Overpass API with endpoint failover."""
+    """Fetch challenge-category places from OpenStreetMap with endpoint failover."""
 
     if use_mock:
         print("Info: Using mock OpenStreetMap data")
         return get_mock_osm_data()
 
-    # Restrict strictly to Singapore administrative area.
     query = """
     [out:json][timeout:25];
     area["ISO3166-1"="SG"][admin_level=2]->.sg;
     (
-      node["shop"](area.sg);
-      way["shop"](area.sg);
+      node["amenity"="restaurant"](area.sg);
+      node["amenity"="cafe"](area.sg);
+      node["amenity"="pharmacy"](area.sg);
+      node["amenity"="fuel"](area.sg);
+      node["tourism"="attraction"](area.sg);
+      node["tourism"="hotel"](area.sg);
+      node["leisure"="amusement_park"](area.sg);
+      node["shop"="mall"](area.sg);
+      node["shop"="department_store"](area.sg);
+      node["shop"="supermarket"](area.sg);
+      node["shop"="convenience"](area.sg);
+      way["amenity"="restaurant"](area.sg);
+      way["amenity"="cafe"](area.sg);
+      way["amenity"="pharmacy"](area.sg);
+      way["amenity"="fuel"](area.sg);
+      way["tourism"="attraction"](area.sg);
+      way["tourism"="hotel"](area.sg);
+      way["leisure"="amusement_park"](area.sg);
+      way["shop"="mall"](area.sg);
+      way["shop"="department_store"](area.sg);
+      way["shop"="supermarket"](area.sg);
+      way["shop"="convenience"](area.sg);
     );
     out center;
     """
@@ -77,15 +98,15 @@ def fetch_osm_shops(use_mock: bool = False, allow_mock_fallback: bool = False) -
                 response.raise_for_status()
                 data = response.json()
 
-                shops = []
+                places = []
                 for element in data.get("elements", []):
-                    shop = _parse_osm_element(element)
-                    if shop:
-                        shops.append(shop)
+                    place = _parse_osm_element(element)
+                    if place:
+                        places.append(place)
 
-                print(f"Success: Fetched {len(shops)} records from OpenStreetMap via {endpoint}")
-                if shops:
-                    return shops
+                print(f"Success: Fetched {len(places)} records from OpenStreetMap via {endpoint}")
+                if places:
+                    return places
 
                 print(f"Info: OSM returned 0 records via {endpoint}")
                 break
@@ -101,7 +122,6 @@ def fetch_osm_shops(use_mock: bool = False, allow_mock_fallback: bool = False) -
 
 def _parse_osm_element(element: Dict) -> Dict:
     """Parse OSM element into standardized format."""
-
     tags = element.get("tags", {})
 
     lat = element.get("lat")
@@ -114,13 +134,17 @@ def _parse_osm_element(element: Dict) -> Dict:
     if not lat or not lon:
         return None
 
+    category = map_osm_category(tags)
+    if not category:
+        return None
+
     return {
-        "name": tags.get("name", "Unknown Shop"),
+        "name": tags.get("name", "Unknown Place"),
         "address": tags.get("addr:full") or tags.get("addr:street") or "Unknown Address",
         "lat": lat,
         "lng": lon,
         "source": "osm",
-        "shop_type": tags.get("shop", "general"),
+        "shop_type": category,
         "phone": tags.get("phone"),
         "website": tags.get("website"),
         "opening_hours": tags.get("opening_hours"),

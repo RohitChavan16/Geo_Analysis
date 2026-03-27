@@ -1,3 +1,6 @@
+from processors.category_filter import classify_text_category
+
+
 def normalize_datagov(records):
     clean = []
 
@@ -17,11 +20,16 @@ def normalize_datagov(records):
         if lat is None or lng is None:
             continue
 
+        category = classify_text_category(name, address)
+        if not category:
+            continue
+
         place = {
             "name": name or "Unknown Shop",
             "address": address or "Unknown Address",
             "lat": lat,
             "lng": lng,
+            "shop_type": category,
             "postal_code": r.get("postal_code") or r.get("PostalCode") or r.get("POSTAL"),
             "source": "data_gov"
         }

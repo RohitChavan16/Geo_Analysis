@@ -18,6 +18,7 @@ from db.crud import (
     get_high_confidence_shops,
     get_shop,
     get_sync_log_by_run_id,
+    get_sync_logs,
     get_latest_sync_log,
     get_shops_by_location,
     get_shops_by_name,
@@ -59,6 +60,7 @@ SYNC_PROGRESS = {
     "matched_groups": 0,
     "scored_records": 0,
     "updated_records": 0,
+    "progress_percent": 0,
     "last_updated": None,
 }
 
@@ -155,6 +157,31 @@ async def get_sync_progress():
     return SYNC_PROGRESS
 
 
+@app.get("/api/sync/history")
+async def get_sync_history(limit: int = Query(20, ge=1, le=100)):
+    try:
+        logs = get_sync_logs(limit=limit)
+        history = []
+        for log in logs:
+            summary = log.get("change_summary", {})
+            history.append({
+                "run_id": log.get("run_id"),
+                "status": log.get("status"),
+                "started_at": log.get("started_at"),
+                "completed_at": log.get("completed_at"),
+                "new_count": summary.get("new_count", 0),
+                "updated_count": summary.get("updated_count", 0),
+                "closed_count": summary.get("closed_count", 0),
+                "closed_low_conf_count": summary.get("closed_low_conf_count", 0),
+                "closed_missing_count": summary.get("closed_missing_count", 0),
+                "source_counts": log.get("source_counts", {"osm": 0, "datagov": 0, "onemap": 0, "total": 0}),
+                "error_message": log.get("error_message"),
+            })
+        return {"history": history}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting sync history: {e}")
+
+
 @app.get("/api/sync/changes")
 async def get_sync_changes(run_id: Optional[str] = Query(None, description="Specific run_id; defaults to latest sync")):
     try:
@@ -164,6 +191,8 @@ async def get_sync_changes(run_id: Optional[str] = Query(None, description="Spec
                 "run_id": None,
                 "new_count": 0,
                 "closed_count": 0,
+                "closed_low_conf_count": 0,
+                "closed_missing_count": 0,
                 "updated_count": 0,
                 "new_shops": [],
                 "closed_shops": [],
@@ -181,6 +210,8 @@ async def get_sync_changes(run_id: Optional[str] = Query(None, description="Spec
             "status": sync_log.get("status"),
             "new_count": change_summary.get("new_count", 0),
             "closed_count": change_summary.get("closed_count", 0),
+            "closed_low_conf_count": change_summary.get("closed_low_conf_count", 0),
+            "closed_missing_count": change_summary.get("closed_missing_count", 0),
             "updated_count": change_summary.get("updated_count", 0),
             "new_shops": sync_log.get("new_shops", []),
             "closed_shops": sync_log.get("closed_shops", []),
@@ -208,6 +239,7 @@ async def trigger_sync(background_tasks: BackgroundTasks):
             matched_groups=0,
             scored_records=0,
             updated_records=0,
+            progress_percent=0,
         )
 
         background_tasks.add_task(run_sync_pipeline, run_id)
@@ -252,6 +284,7 @@ async def trigger_realtime_update(
             matched_groups=0,
             scored_records=0,
             updated_records=0,
+            progress_percent=0,
         )
 
         background_tasks.add_task(run_realtime_update_pipeline, run_id, min_confidence)
@@ -277,7 +310,7 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
             return base * 0.75
         return base
 
-    def _format_change(shop: dict, status: str, recommendation: str, source_counts: dict, reason: str) -> dict:
+    def _format_change(shop: dict, status: str, recommendation: str, source_counts: dict, reason: str, closure_type: Optional[str] = None) -> dict:
         sources = shop.get("sources", [])
         weighted_confidence = float(shop.get("confidence_score", 0)) / 100.0
         if sources:
@@ -295,6 +328,7 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
             "confirmed_from": ", ".join(sources) if sources else "single source",
             "recommendation": recommendation,
             "reason": reason,
+            "closure_type": closure_type,
             "sources": sources,
             "phone": shop.get("phone"),
             "website": shop.get("website"),
@@ -319,12 +353,15 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
 
     try:
         datagov_max_records = int(os.getenv("DATA_GOV_MAX_RECORDS", "1000"))
+        new_threshold = float(os.getenv("NEW_SHOP_CONF_THRESHOLD", "30"))
+        close_threshold = float(os.getenv("CLOSE_SHOP_CONF_THRESHOLD", "30"))
         print("Fetching fresh data from all sources...")
         update_sync_progress(
             active_run_id=run_id,
             status="running",
             stage="fetching",
             message="Fetching from OSM, data.gov.sg, and OneMap",
+            progress_percent=10,
         )
 
         existing_active_before = get_all_active_shops(limit=100000, offset=0)
@@ -338,6 +375,7 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
             stage="fetching",
             message="Fetched OpenStreetMap data",
             source_counts={"osm": len(osm_data), "datagov": 0, "onemap": 0, "total": len(osm_data)},
+            progress_percent=20,
         )
 
         try:
@@ -354,6 +392,7 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
                 "onemap": 0,
                 "total": len(osm_data) + len(datagov_data),
             },
+            progress_percent=30,
         )
 
         try:
@@ -375,20 +414,35 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
 
         if not all_records:
             complete_sync_log(run_id, "failed", "No live source data fetched (all sources empty)")
-            update_sync_log(run_id, {"source_counts": source_counts, "change_summary": {"new_count": 0, "closed_count": 0, "updated_count": 0}})
-            update_sync_progress(status="failed", stage="failed", message="No live source data fetched (all sources empty)")
+            update_sync_log(
+                run_id,
+                {
+                    "source_counts": source_counts,
+                    "change_summary": {
+                        "new_count": 0,
+                        "closed_count": 0,
+                        "closed_low_conf_count": 0,
+                        "closed_missing_count": 0,
+                        "updated_count": 0,
+                    },
+                },
+            )
+            update_sync_progress(status="failed", stage="failed", message="No live source data fetched (all sources empty)", progress_percent=100)
             return
 
-        update_sync_progress(stage="matching", message="Matching records across sources")
+        update_sync_progress(stage="matching", message="Matching records across sources", progress_percent=45)
         matched_groups = match_shops(all_records)
         update_sync_progress(matched_groups=len(matched_groups))
 
-        update_sync_progress(stage="scoring", message="Scoring and storing matched groups")
+        update_sync_progress(stage="scoring", message="Scoring and storing matched groups", progress_percent=55)
         observed_records = []
         new_shops = []
         updated_shops = []
+        low_conf_closed = []
         new_count = 0
         updated_count = 0
+        low_conf_closed_count = 0
+        closed_ids = set()
 
         for group in matched_groups:
             if not group:
@@ -397,9 +451,6 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
             merged_group = merge_shop_groups(group)
             confidence_data = calculate_confidence(merged_group)
             confidence_score = confidence_data.get("confidence_score", 0)
-            if confidence_score < min_confidence:
-                continue
-
             shop_data = {
                 "name": merged_group.get("name"),
                 "address": merged_group.get("address"),
@@ -424,45 +475,65 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
 
             if existing_shops:
                 shop_id = existing_shops[0]["_id"]
-                update_shop(shop_id, shop_data)
-                updated_count += 1
-                if len(updated_shops) < 30:
-                    updated_shops.append(
-                        _format_change(
-                            {**shop_data, "_existing": True},
-                            "Existing Place",
-                            "Accept",
-                            source_counts,
-                            "Matched an existing active shop in database.",
+                if confidence_score < close_threshold:
+                    update_shop(shop_id, {"is_active": False, "closed_at": datetime.utcnow(), "closure_reason": f"Low confidence ({confidence_score:.1f})"})
+                    closed_ids.add(shop_id)
+                    low_conf_closed_count += 1
+                    if len(low_conf_closed) < 30:
+                        low_conf_closed.append(
+                            _format_change(
+                                {**shop_data, "_existing": True},
+                                "Closed Place",
+                                "Review",
+                                source_counts,
+                                f"Existing DB place confidence {confidence_score:.1f} < {close_threshold}; auto-marked closed.",
+                                "low_confidence",
+                            )
                         )
-                    )
+                elif confidence_score >= min_confidence:
+                    update_shop(shop_id, shop_data)
+                    updated_count += 1
+                    if len(updated_shops) < 30:
+                        updated_shops.append(
+                            _format_change(
+                                {**shop_data, "_existing": True},
+                                "Existing Place",
+                                "Accept",
+                                source_counts,
+                                "Matched an existing active shop in database.",
+                            )
+                        )
             else:
-                create_shop(shop_data)
-                new_count += 1
-                if len(new_shops) < 30:
-                    new_shops.append(
-                        _format_change(
-                            {**shop_data, "_existing": False},
-                            "New Place",
-                            "Review",
-                            source_counts,
-                            "Not found in active DB within spatial/name threshold. data.gov.sg evidence weighted highest for opening confidence.",
+                if confidence_score >= new_threshold:
+                    create_shop(shop_data)
+                    new_count += 1
+                    if len(new_shops) < 30:
+                        new_shops.append(
+                            _format_change(
+                                {**shop_data, "_existing": False},
+                                "New Place",
+                                "Review",
+                                source_counts,
+                                f"Not found in DB and confidence {confidence_score:.1f} >= {new_threshold}. data.gov.sg weighted highest for opening signal.",
+                            )
                         )
-                    )
 
             if (updated_count + new_count) % 100 == 0:
-                update_sync_progress(updated_records=updated_count + new_count)
+                progress = 55 + min(25, ((updated_count + new_count) // 100) * 2)
+                update_sync_progress(updated_records=updated_count + new_count, progress_percent=progress)
 
-        update_sync_progress(stage="closure_check", message="Detecting closed shops")
+        update_sync_progress(stage="closure_check", message="Detecting closed shops", progress_percent=85)
         closed_shops = []
-        closed_count = 0
+        missing_closed_count = 0
         for old_shop in existing_active_before:
             if not old_shop.get("is_active", True):
+                continue
+            if old_shop.get("_id") in closed_ids:
                 continue
             if _exists_in_observed(old_shop, observed_records):
                 continue
             update_shop(old_shop.get("_id"), {"is_active": False, "closed_at": datetime.utcnow()})
-            closed_count += 1
+            missing_closed_count += 1
             if len(closed_shops) < 30:
                 old_shop["confidence_score"] = old_shop.get("confidence_score", 0)
                 closed_shops.append(
@@ -472,12 +543,19 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
                         "Review",
                         source_counts,
                         "Previously active shop not observed in latest multi-source sync. data.gov.sg absence contributes strongest closure signal; low-volume sources are down-weighted.",
+                        "not_observed",
                     )
                 )
+
+        # include low-confidence closed records in closed list/count
+        closed_shops = low_conf_closed + closed_shops
+        closed_count = low_conf_closed_count + missing_closed_count
 
         change_summary = {
             "new_count": new_count,
             "closed_count": closed_count,
+            "closed_low_conf_count": low_conf_closed_count,
+            "closed_missing_count": missing_closed_count,
             "updated_count": updated_count,
         }
         update_sync_log(
@@ -494,20 +572,29 @@ def run_realtime_update_pipeline(run_id: str, min_confidence: float):
             },
         )
 
-        complete_sync_log(run_id, "success", f"new={new_count}, updated={updated_count}, closed={closed_count}")
+        complete_sync_log(
+            run_id,
+            "success",
+            f"new={new_count}, updated={updated_count}, closed={closed_count} "
+            f"(low_conf={low_conf_closed_count}, missing={missing_closed_count})",
+        )
         update_sync_progress(
             status="success",
             stage="completed",
-            message=f"Completed: {new_count} new, {updated_count} updated, {closed_count} closed",
+            message=(
+                f"Completed: {new_count} new, {updated_count} updated, {closed_count} closed "
+                f"(low_conf={low_conf_closed_count}, missing={missing_closed_count})"
+            ),
             updated_records=updated_count + new_count,
             scored_records=len(matched_groups),
+            progress_percent=100,
         )
         print(f"Realtime update completed: {change_summary}")
 
     except Exception as e:
         error_msg = str(e)
         complete_sync_log(run_id, "failed", error_msg)
-        update_sync_progress(status="failed", stage="failed", message=error_msg)
+        update_sync_progress(status="failed", stage="failed", message=error_msg, progress_percent=100)
         print(f"Real-time update failed: {error_msg}")
 
 
