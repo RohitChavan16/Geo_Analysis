@@ -3,13 +3,21 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environment
 venv/
 env/
+.venv/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 backend/.env
 
 # Vector databases
@@ -24,6 +32,7 @@ faiss_index/
 # Logs
 logs/
 *.log
+.next-dev-*.log
 
 # Jupyter
 .ipynb_checkpoints/
@@ -34,7 +43,19 @@ Thumbs.db
 
 # Node
 node_modules/
+frontend/node_modules/
 
 # Build
 dist/
 build/
+frontend/dist/
+
+# Local databases and generated data
+*.db
+*.sqlite
+*.sqlite3
+geoshop_test.db
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  backend-import-check:
+    name: Backend import check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: geoshop_engine
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Import active modules
+        run: |
+          python - <<'PY'
+          modules = [
+              "api.main",
+              "db.database",
+              "db.crud",
+              "db.models",
+              "data_fetchers.datagov_fetcher",
+              "data_fetchers.osm_fetcher",
+              "data_fetchers.onemap_fetcher",
+              "data_fetchers.digital_sources_fetcher",
+              "processors.category_filter",
+              "processors.matcher",
+              "processors.normalizer",
+              "signal_engine.signal_calculator",
+              "signal_engine.digital_footprint",
+          ]
+          for module in modules:
+              __import__(module)
+              print(f"imported {module}")
+          PY
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: geoshop_engine/frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: geoshop_engine/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
