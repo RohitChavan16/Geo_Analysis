@@ -1,6 +1,6 @@
 # Troubleshooting
 
-## API Starts But Database Is Disconnected
+## Database Connectivity Diagnostics
 
 Run:
 
@@ -16,7 +16,7 @@ Check:
 - username/password are URL encoded.
 - database user has read/write permission.
 
-## Dashboard Shows No Data
+## Dashboard Data Flow Checks
 
 Check:
 
@@ -25,7 +25,7 @@ Check:
 - MongoDB has `shops` documents.
 - Browser network tab has no CORS or 500 errors.
 
-## Sync Returns No Source Records
+## Source Fetch Diagnostics
 
 Check:
 
@@ -35,11 +35,11 @@ Check:
 - `ONEMAP_MAX_PAGES`;
 - Overpass endpoint availability.
 
-## Tests Fail With SQLAlchemy Import Errors
+## Component Tests Need Consolidation
 
-`test_pipeline.py` and `verify.py` are stale and expect old SQLite/SQLAlchemy symbols. Rewrite them around MongoDB or mock `db.crud` before using them.
+The test roadmap is to consolidate legacy component checks into a MongoDB-backed `pytest` suite that mirrors the active API and persistence architecture.
 
-## Map Markers Do Not Render
+## Map Marker Rendering Checks
 
 Check that shop records have finite numeric `lat` and `lng`. The frontend drops invalid coordinates.
 

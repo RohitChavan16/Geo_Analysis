@@ -14,7 +14,7 @@ This project follows Semantic Versioning once public releases begin.
 ### Documented
 
 - Actual FastAPI, MongoDB, React, matching, scoring, and sync architecture.
-- Current production gaps, including missing authentication, stale tests, and scaling risks.
+- Architecture evolution items, including access control, test consolidation, and scaling strategy.
 
 ## [0.1.0] - Initial Project State
 

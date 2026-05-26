@@ -1,6 +1,6 @@
 # Deployment
 
-The repository currently implements script-based deployment. Docker, docker-compose, Terraform, Kubernetes manifests, and platform-specific deployment files are not present.
+The repository implements a process-based deployment path that maps cleanly to local development, VM-based hosting, container platforms, or managed app services.
 
 ## Local Development
 
@@ -66,7 +66,7 @@ flowchart LR
     Worker --> Sources[Public source APIs]
 ```
 
-## Docker Recommendation
+## Containerization Roadmap
 
 Add:
 
@@ -76,11 +76,11 @@ Add:
 - Healthcheck for `/api/health`.
 - Non-root runtime user.
 
-## CI/CD Recommendation
+## CI/CD Evolution
 
 The added GitHub Actions workflow validates Python imports and frontend build. Next steps:
 
-- Add pytest tests after repairing stale SQLAlchemy-era tests.
+- Add pytest coverage around the active MongoDB-backed pipeline.
 - Add dependency scanning.
 - Add Docker image build.
 - Add deployment gates for staging and production.

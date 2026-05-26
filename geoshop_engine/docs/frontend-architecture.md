@@ -61,7 +61,7 @@ Tailwind is configured in `tailwind.config.js`. The UI supports class-based dark
 ## Improvements
 
 - Add request cancellation during refresh overlap.
-- Add stale/loading states per panel.
+- Add loading and freshness indicators per panel.
 - Add auth token support in `api.js`.
 - Add frontend tests with Vitest and React Testing Library.
 - Add map clustering when shop volume grows.

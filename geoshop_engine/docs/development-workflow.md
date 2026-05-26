@@ -27,11 +27,9 @@ python -m scheduler.jobs
 cd frontend && npm run build
 ```
 
-## Testing Reality
+## Verification Workflow
 
-`test_mongodb.py` is current for MongoDB diagnostics. `test_e2e.py` partially reflects the current API but assumes a running server and hard-coded local paths.
-
-`test_pipeline.py` and `verify.py` reference removed SQLAlchemy symbols such as `init_db`, `SessionLocal`, `Shop`, and `SyncLog`. These should be rewritten before being used as quality gates.
+`test_mongodb.py` validates MongoDB configuration. `test_e2e.py` exercises the project structure, imports, API availability, frontend files, and demo pipeline flow. The next test evolution is to consolidate component checks into a MongoDB-backed `pytest` suite.
 
 ## Branch Naming
 

@@ -53,14 +53,7 @@ sequenceDiagram
 
 The backend is a single FastAPI process. It owns HTTP routes and also runs ingestion work through `BackgroundTasks`. During a sync, `SYNC_PROGRESS` in `api/main.py` is mutated in memory and read by `/api/sync/progress`.
 
-This is simple and useful for local demos, but it has production tradeoffs:
-
-- progress disappears on restart;
-- progress is not shared across multiple API instances;
-- long-running ingestion work competes with API request handling;
-- failed process state can leave a sync log marked `running`.
-
-Production architecture should split API and worker responsibilities.
+This design keeps the synchronization workflow easy to inspect during development and architecture exploration. The natural production evolution is to persist progress in a shared store and move long-running ingestion work into dedicated worker processes.
 
 ## Frontend Architecture
 
@@ -80,7 +73,7 @@ MongoDB stores flexible documents:
 - `shops`: canonical merged place records and operational state.
 - `sync_logs`: run-level metadata and sampled change output.
 
-Documents are intentionally flexible because source fields and scoring metadata evolve. The tradeoff is weaker schema enforcement than a relational model.
+Documents are intentionally flexible because source fields and scoring metadata evolve. This makes MongoDB a strong fit for preserving raw evidence while the scoring model and source adapters continue to grow.
 
 ## Matching And Scoring
 

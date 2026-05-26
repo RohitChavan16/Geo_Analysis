@@ -1,11 +1,11 @@
 # Authentication
 
-GeoShop Engine currently has no application-level authentication or authorization.
+GeoShop Engine is structured so access control can be layered cleanly around operational endpoints as the platform evolves from local/internal workflows to shared deployments.
 
-## Implemented Behavior
+## Current Access Model
 
-- All FastAPI routes are callable without credentials.
-- CORS allows all origins:
+- FastAPI routes are optimized for local/internal operation.
+- CORS is configured permissively for dashboard development:
 
 ```python
 allow_origins=["*"]
@@ -17,16 +17,16 @@ allow_headers=["*"]
 - OneMap upstream access can use `ONEMAP_ACCESS_TOKEN` or `ONEMAP_API_KEY`.
 - MongoDB credentials are supplied through `MONGODB_URL`.
 
-## Risk By Endpoint Type
+## Access Patterns By Endpoint Type
 
-| Endpoint Type | Examples | Risk |
+| Endpoint Type | Examples | Access Pattern |
 | --- | --- | --- |
-| Read-only shop endpoints | `/api/shops`, `/api/shops/stats` | Data exposure if public. |
-| Operational write endpoints | `/api/sync/trigger`, `/api/update/realtime` | Expensive ingestion can be triggered by anyone. |
-| Debug endpoints | `/api/debug/pipeline-data` | Can call external APIs and expose source samples. |
-| Health endpoints | `/api/health/database` | Reveals database name and collection counts. |
+| Read endpoints | `/api/shops`, `/api/shops/stats` | Suitable for viewer access. |
+| Operational endpoints | `/api/sync/trigger`, `/api/update/realtime` | Suitable for operator access. |
+| Debug endpoints | `/api/debug/pipeline-data` | Suitable for maintainer/admin access. |
+| Health endpoints | `/api/health/database` | Suitable for internal operational access. |
 
-## Recommended Production Flow
+## Production-Oriented Access Flow
 
 ```mermaid
 sequenceDiagram
@@ -45,7 +45,7 @@ sequenceDiagram
 
 ## Role Model
 
-Recommended roles:
+Suggested roles:
 
 - `viewer`: read shops, stats, history, and changes.
 - `operator`: trigger syncs and real-time updates.
@@ -55,9 +55,9 @@ Recommended roles:
 
 - JWT validation in FastAPI dependencies.
 - API gateway authentication in front of the service.
-- Internal-only deployment with VPN plus service-level API keys.
+- Internal deployment with VPN plus service-level API keys.
 
-## Immediate Hardening Checklist
+## Operational Hardening Path
 
 - Replace wildcard CORS with explicit dashboard origins.
 - Require authentication on sync and debug endpoints.

@@ -2,7 +2,7 @@
 
 Base URL defaults to `http://localhost:8000/api`. Some shop endpoints also have legacy aliases without `/api`.
 
-Authentication is not implemented. All endpoints are currently unauthenticated.
+The API is documented around the local/internal engineering workflow used by the project. Access-control recommendations are covered in [authentication.md](authentication.md) as part of the platform evolution path.
 
 ## Common Error Shape
 
@@ -53,7 +53,7 @@ Response:
 }
 ```
 
-If MongoDB is unavailable, the endpoint returns `database_status: disconnected` with an `error` string.
+When database connectivity changes, the endpoint returns a structured status payload with diagnostic context.
 
 ## GET /api/shops
 

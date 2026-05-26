@@ -1,5 +1,7 @@
 # Performance Optimization
 
+GeoShop Engine includes performance-minded design choices across ingestion, persistence, and dashboard rendering. The roadmap extends those choices toward larger datasets and multi-instance operation.
+
 ## Implemented Optimizations
 
 - Parallel source fetches in `run_realtime_update_pipeline`.
@@ -8,16 +10,17 @@
 - MongoDB indexes for common filters.
 - Frontend `Promise.all` for dashboard fetches.
 - Map base marker cap of 900 records.
+- Source record caps and pagination controls.
 
-## Bottlenecks
+## Performance Evolution Areas
 
-- Matching compares each record with later records.
-- Closure detection compares old active shops to observed records.
-- `get_all_active_shops(limit=100000)` can become heavy.
-- Regex name search is basic and may not use optimal indexes.
-- Sync work runs inside the API process.
+- Candidate matching can evolve from pairwise comparison to spatial bucketing.
+- Closure detection can evolve from active-set comparison to incremental source snapshots.
+- Active-shop retrieval can be partitioned by geography, update window, or source.
+- Name search can use text indexes and ranking strategies.
+- Sync execution can move from API background tasks to worker queues.
 
-## Recommendations
+## Roadmap
 
 - Add geohash bucketing before fuzzy matching.
 - Add MongoDB geospatial index and `$near` queries.

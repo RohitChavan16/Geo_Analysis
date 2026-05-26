@@ -72,7 +72,7 @@ The real-time pipeline also writes flexible fields:
 
 ## Relationships
 
-MongoDB does not enforce relationships. A shop can be referenced only inside sync-log sampled change payloads. There is no foreign-key relationship between `shops` and `sync_logs`.
+MongoDB keeps the data model document-oriented. Shop records and sync logs are linked operationally through run context and sampled change payloads rather than relational foreign keys.
 
 ```mermaid
 erDiagram
@@ -111,21 +111,13 @@ erDiagram
 5. Confidence and decision fields are computed.
 6. Existing shops are found by first-token regex plus coordinate bounds.
 7. Existing shops are updated, low-score matches are closed, and new candidates are inserted.
-8. Existing active shops missing from the latest observation set are marked inactive.
+8. Existing active shops absent from the latest observation set are marked inactive.
 
-## Current Data Risks
-
-- No unique canonical place key is enforced.
-- First-token matching can miss renamed shops or generic names.
-- Coordinate index is not a true MongoDB `2dsphere` index.
-- `raw_data` can grow large and increase document size.
-- Flexible fields written by the pipeline are not represented fully in Pydantic models.
-
-## Recommended Improvements
+## Architecture Evolution
 
 - Add a stable `place_key` or `canonical_id`.
-- Use `update_one(..., upsert=True)` where appropriate.
-- Add a `2dsphere` coordinate field for proper geospatial queries.
-- Store raw source records in a separate collection if payloads grow.
-- Add JSON schema validation at the MongoDB collection level for required fields.
+- Use upsert workflows for idempotent synchronization.
+- Add a `2dsphere` coordinate field for advanced geospatial queries.
+- Move raw source evidence into a source-record collection as data volume grows.
+- Add MongoDB collection validation for core required fields.
 

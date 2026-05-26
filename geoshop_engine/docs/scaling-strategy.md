@@ -1,41 +1,43 @@
 # Scaling Strategy
 
-## Current Scaling Limits
+GeoShop Engine is built around clear boundaries between ingestion, matching, scoring, persistence, API access, and dashboard visibility. Those boundaries make the project a strong foundation for distributed execution and larger datasets.
 
-| Area | Current Behavior | Limit |
+## Current Scaling Characteristics
+
+| Area | Current Behavior | Architecture Evolution |
 | --- | --- | --- |
-| Matching | Nested loop over all records | O(n²) growth. |
-| Progress | Global in-process dict | Not multi-instance safe. |
-| Jobs | FastAPI background tasks | Coupled to web process lifecycle. |
-| Closure detection | Scans up to 100,000 active shops | Expensive as data grows. |
-| Search | Regex and coordinate bounds | Limited relevance and geospatial precision. |
+| Matching | Pairwise comparison across fetched records | Spatial bucketing and geospatial candidate pruning. |
+| Progress | Process-local progress dictionary | Shared progress state in MongoDB or Redis. |
+| Jobs | FastAPI background tasks | Dedicated worker queue for distributed execution. |
+| Closure detection | Active-shop comparison against observed records | Incremental source snapshots and geospatial prefilters. |
+| Search | Regex and coordinate bounds | Text indexes and MongoDB geospatial queries. |
 
-## Recommended Scaling Path
+## Scaling Path
 
-### Phase 1: Make Writes Idempotent
+### Phase 1: Idempotent Writes
 
-- Add canonical place key.
-- Use upsert instead of blind insert.
-- Track source-specific external ids where available.
+- Add canonical place keys.
+- Use upsert workflows for repeatable sync runs.
+- Track source-specific external identifiers where available.
 
-### Phase 2: Improve Matching
+### Phase 2: Spatial Candidate Pruning
 
 - Bucket candidates by geohash or rounded coordinates.
-- Use MongoDB `2dsphere` index and `$near` queries.
-- Compare text only within spatial candidate buckets.
+- Use MongoDB `2dsphere` indexes and `$near` queries.
+- Compare text within spatial candidate buckets.
 
-### Phase 3: Split Workers
+### Phase 3: Distributed Workers
 
-- Move sync execution to Celery, RQ, Dramatiq, or managed queues.
+- Move sync execution to Celery, RQ, Dramatiq, or a managed queue.
 - Persist job progress in MongoDB or Redis.
 - Keep FastAPI focused on HTTP reads and job submission.
 
-### Phase 4: Add Observability And Controls
+### Phase 4: Operational Controls
 
-- Rate limit sync triggers.
+- Add rate limits for sync triggers.
 - Add source-specific circuit breakers.
 - Record per-stage timings.
-- Add alerts for zero-record source runs.
+- Add alerting for source-count anomalies.
 
 ## Multi-Instance Design
 

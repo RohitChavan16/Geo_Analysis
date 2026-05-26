@@ -27,19 +27,11 @@ The backend is a Python FastAPI application.
 6. Match records into groups.
 7. Merge groups and calculate scores.
 8. Update existing shops or create new shops.
-9. Mark low-confidence or not-observed shops inactive.
+9. Mark closure candidates inactive through decision-score and observation rules.
 10. Persist sync log summaries and update progress.
 
-## Error Handling
+## Exception Handling Strategy
 
-Most route handlers wrap logic in `try/except` and raise `HTTPException(500)`. The global exception handler returns the exception string. Production should avoid returning raw exception text to public clients.
+Route handlers convert operational exceptions into HTTP responses, while the global exception handler provides a consistent response shape during development. The production evolution path is to standardize client-safe errors and route detailed diagnostics into structured logs.
 
-## Current Backend Gaps
-
-- No auth middleware.
-- No durable job queue.
-- No structured logging.
-- Broad exception handling.
-- Process-local caches/progress.
-- Stale CLI/test references to SQLAlchemy-era database code.
 

@@ -11,9 +11,9 @@
 | Sync history | MongoDB `sync_logs` collection |
 | Console logs | `print()` calls in fetchers, pipeline, database setup |
 
-## Not Implemented
+## Observability Expansion Path
 
-- Prometheus metrics.
+- Prometheus-compatible metrics.
 - Grafana dashboards.
 - Structured JSON logging.
 - Distributed tracing.
@@ -25,7 +25,7 @@
 
 - Source fetch duration by source.
 - Source fetch record count by source.
-- Source fetch failure count by source.
+- Source fetch exception count by source.
 - Match group count.
 - New, updated, closed counts per run.
 - Sync duration and status.
@@ -47,7 +47,7 @@ Use structured JSON logs with:
 
 ## Alerting Rules
 
-- Sync failed.
+- Sync status transitions into an exception state.
 - No successful sync in expected interval.
 - All sources return zero records.
 - MongoDB health check fails.
